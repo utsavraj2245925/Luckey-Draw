@@ -1,0 +1,369 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { useSocket } from '../hooks/useSocket';
+import { playDrumRoll, playWinnerFanfare, resumeAudio } from '../hooks/useAudio';
+import confetti from 'canvas-confetti';
+
+const LOGO_PG = 'https://cms-complaint-avidence.s3.eu-north-1.amazonaws.com/pg-logo-Photoroom.png';
+const LOGO_ONLY = 'https://cms-complaint-avidence.s3.eu-north-1.amazonaws.com/pg-logo-Photoroom+(1).png';
+
+const GROUP_LABELS = { 1: 'Group A', 2: 'Group B', 3: 'Group C' };
+const GROUP_COLORS = { 1: '#3b82f6', 2: '#8b5cf6', 3: '#10b981' };
+const GROUP_BG = { 1: '#eff6ff', 2: '#f5f3ff', 3: '#ecfdf5' };
+
+function roundToGroup(r) {
+  if (r <= 3) return 1;
+  if (r <= 6) return 2;
+  return 3;
+}
+
+function fireConfetti() {
+  const end = Date.now() + 4000;
+  const colors = ['#C8102E', '#D4AF37', '#FFD700', '#FF6B6B', '#4ECDC4'];
+  (function frame() {
+    confetti({ particleCount: 3, angle: 60, spread: 55, origin: { x: 0 }, colors });
+    confetti({ particleCount: 3, angle: 120, spread: 55, origin: { x: 1 }, colors });
+    if (Date.now() < end) requestAnimationFrame(frame);
+  })();
+}
+
+// Slot-machine style drum component
+function SlotDrum({ spinning, finalNumber, allSerials }) {
+  const [displayNums, setDisplayNums] = useState(['?', '?', '?']);
+  const intervalRef = useRef(null);
+  const speedRef = useRef(60);
+  const elapsedRef = useRef(0);
+
+  useEffect(() => {
+    if (!spinning) {
+      clearInterval(intervalRef.current);
+      if (finalNumber) setDisplayNums([finalNumber, '', '']);
+      return;
+    }
+    setDisplayNums(['?', '?', '?']);
+    elapsedRef.current = 0;
+    speedRef.current = 60;
+
+    const tick = () => {
+      const pool = allSerials && allSerials.length > 0 ? allSerials : Array.from({ length: 900 }, (_, i) => i + 1);
+      const r1 = pool[Math.floor(Math.random() * pool.length)];
+      const r2 = pool[Math.floor(Math.random() * pool.length)];
+      const r3 = pool[Math.floor(Math.random() * pool.length)];
+      setDisplayNums([r1, r2, r3]);
+      elapsedRef.current += speedRef.current;
+    };
+
+    intervalRef.current = setInterval(tick, speedRef.current);
+
+    // Gradually slow down
+    const slowDown = setInterval(() => {
+      if (elapsedRef.current > 4500) {
+        clearInterval(slowDown);
+        clearInterval(intervalRef.current);
+        speedRef.current = 200;
+        intervalRef.current = setInterval(tick, 200);
+        setTimeout(() => { clearInterval(intervalRef.current); }, 1200);
+      }
+    }, 200);
+
+    return () => { clearInterval(intervalRef.current); clearInterval(slowDown); };
+  }, [spinning, finalNumber]);
+
+  return (
+    <div style={{ display: 'flex', gap: 16, justifyContent: 'center', alignItems: 'center' }}>
+      {displayNums.map((n, i) => (
+        <motion.div key={i}
+          animate={spinning ? { y: [0, -8, 0] } : {}}
+          transition={spinning ? { duration: 0.1, repeat: Infinity } : {}}
+          style={{
+            width: 120, height: 120, borderRadius: 16,
+            background: spinning ? 'linear-gradient(135deg, #C8102E, #8b0000)' : 'linear-gradient(135deg, #D4AF37, #FFD700)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            boxShadow: spinning ? '0 8px 30px rgba(200,16,46,0.4)' : '0 8px 30px rgba(212,175,55,0.6)',
+            border: `3px solid ${spinning ? '#ff4444' : '#B8960C'}`,
+          }}
+        >
+          <span style={{ fontSize: i === 0 ? 52 : 36, fontWeight: 900, color: '#fff', fontFamily: 'Georgia, serif', opacity: i === 0 ? 1 : 0.6 }}>
+            {n}
+          </span>
+        </motion.div>
+      ))}
+    </div>
+  );
+}
+
+export default function LiveDraw() {
+  const [phase, setPhase] = useState('idle'); // idle | spinning | revealed | completed
+  const [currentRound, setCurrentRound] = useState(1);
+  const [currentGroup, setCurrentGroup] = useState(1);
+  const [winner, setWinner] = useState(null);
+  const [prize, setPrize] = useState(null);
+  const [spinData, setSpinData] = useState(null);
+  const [prevWinners, setPrevWinners] = useState([]);
+  const [audioUnlocked, setAudioUnlocked] = useState(false);
+  const [gameStarted, setGameStarted] = useState(false);
+
+  // Unlock audio on first interaction
+  const unlockAudio = () => {
+    resumeAudio();
+    setAudioUnlocked(true);
+  };
+
+  useSocket({
+    'game:state': ({ state }) => {
+      if (state) {
+        setCurrentRound(state.currentRound || 1);
+        setCurrentGroup(roundToGroup(state.currentRound || 1));
+        setGameStarted(state.isActive || false);
+        if (state.status === 'idle' || state.status === 'revealed') setPhase(state.status);
+      }
+    },
+    'game:spin_start': (data) => {
+      setPhase('spinning');
+      setWinner(null);
+      setPrize(null);
+      setSpinData(data);
+      setCurrentRound(data.roundNo);
+      setCurrentGroup(data.group);
+      playDrumRoll(6000);
+    },
+    'game:winner_revealed': (data) => {
+      setPhase('revealed');
+      setWinner(data.employee);
+      setPrize(data.prize);
+      setSpinData(null);
+      playWinnerFanfare();
+      fireConfetti();
+      // Add to prev winners
+      setPrevWinners(p => [...p.filter(w => w.roundNo !== data.roundNo), { roundNo: data.roundNo, group: data.group, ...data.employee, prize: data.prize }]);
+    },
+    'game:next_round': ({ round, group }) => {
+      setPhase('idle');
+      setCurrentRound(round);
+      setCurrentGroup(group);
+      setWinner(null);
+      setPrize(null);
+    },
+    'game:reset': () => {
+      setPhase('idle'); setCurrentRound(1); setCurrentGroup(1);
+      setWinner(null); setPrize(null); setPrevWinners([]); setGameStarted(false);
+    },
+    'game:completed': () => {
+      setPhase('completed');
+    },
+  });
+
+  // Fetch initial state
+  useEffect(() => {
+    fetch('/api/game/state').then(r => r.json()).then(({ state, winners }) => {
+      if (state) {
+        setCurrentRound(state.currentRound || 1);
+        setCurrentGroup(roundToGroup(state.currentRound || 1));
+        setGameStarted(state.isActive || false);
+        setPhase(state.status || 'idle');
+      }
+      if (winners) {
+        setPrevWinners(winners.map(w => ({
+          roundNo: w.roundNo, group: w.group,
+          serialNo: w.employee?.serialNo, name: w.employee?.name,
+          department: w.employee?.department, prize: w.prize,
+        })));
+        if (winners.length > 0 && state?.status === 'revealed') {
+          const last = winners[winners.length - 1];
+          setWinner(last.employee);
+          setPrize(last.prize);
+        }
+      }
+    }).catch(() => {});
+  }, []);
+
+  const diyaStyle = { fontSize: 28, animation: 'flicker 0.8s ease-in-out infinite' };
+
+  return (
+    <div
+      onClick={unlockAudio}
+      style={{ minHeight: '100vh', background: 'linear-gradient(160deg, #fff8f0 0%, #fff0e6 40%, #fff5f0 100%)', fontFamily: '-apple-system, sans-serif', overflow: 'hidden' }}
+    >
+      {/* Top Header */}
+      <div style={{ background: '#fff', borderBottom: '3px solid #C8102E', padding: '12px 32px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', boxShadow: '0 2px 12px rgba(200,16,46,0.1)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <img src={LOGO_PG} alt="PG" style={{ height: 48, objectFit: 'contain' }} />
+        </div>
+        <div style={{ textAlign: 'center' }}>
+          <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900, color: '#1a1a1a', fontFamily: 'Georgia, serif', letterSpacing: 1 }}>
+            🪔 Grand Diwali Lucky Draw 2026 🪔
+          </h1>
+          <p style={{ margin: 0, fontSize: 13, color: '#888', marginTop: 2 }}>PG Group — Celebrating Together</p>
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <span style={diyaStyle}>🪔</span>
+          <span style={{ ...diyaStyle, animationDelay: '0.3s' }}>🪔</span>
+          <span style={{ ...diyaStyle, animationDelay: '0.6s' }}>🪔</span>
+        </div>
+      </div>
+
+      {/* Round indicators */}
+      <div style={{ display: 'flex', justifyContent: 'center', gap: 6, padding: '12px 0 0', flexWrap: 'wrap' }}>
+        {Array.from({ length: 9 }, (_, i) => {
+          const r = i + 1;
+          const won = prevWinners.find(w => w.roundNo === r);
+          const isCurrent = r === currentRound && gameStarted;
+          return (
+            <div key={r} style={{
+              width: 44, height: 44, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 13, fontWeight: 700,
+              background: won ? '#D4AF37' : isCurrent ? '#C8102E' : '#f0f0f0',
+              color: won || isCurrent ? '#fff' : '#999',
+              boxShadow: isCurrent ? '0 0 0 3px rgba(200,16,46,0.3)' : 'none',
+              border: `2px solid ${won ? '#B8960C' : isCurrent ? '#C8102E' : '#e0e0e0'}`,
+              transition: 'all 0.3s',
+            }}>
+              {won ? '🏆' : `R${r}`}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Main Stage */}
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '20px 24px 0', gap: 20 }}>
+
+        {/* Group Banner */}
+        {gameStarted && (
+          <motion.div
+            key={currentRound}
+            initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }}
+            style={{
+              background: GROUP_BG[currentGroup], border: `2px solid ${GROUP_COLORS[currentGroup]}`,
+              borderRadius: 12, padding: '10px 32px', textAlign: 'center',
+            }}
+          >
+            <span style={{ fontSize: 14, fontWeight: 600, color: GROUP_COLORS[currentGroup] }}>
+              {GROUP_LABELS[currentGroup]} &nbsp;·&nbsp; Round {currentRound} of 9
+            </span>
+          </motion.div>
+        )}
+
+        {/* Drum / Spin Area */}
+        {gameStarted && (phase === 'spinning' || phase === 'idle') && (
+          <div style={{ textAlign: 'center', padding: '12px 0' }}>
+            <p style={{ color: '#888', fontSize: 15, marginBottom: 16 }}>
+              {phase === 'spinning' ? '🎰 Drawing...' : '⏳ Waiting for Admin to Spin'}
+            </p>
+            <SlotDrum
+              spinning={phase === 'spinning'}
+              finalNumber={null}
+              allSerials={spinData?.allSerials || []}
+            />
+          </div>
+        )}
+
+        {/* WINNER REVEAL */}
+        <AnimatePresence>
+          {phase === 'revealed' && winner && (
+            <motion.div
+              initial={{ scale: 0.5, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              transition={{ type: 'spring', stiffness: 200, damping: 15 }}
+              style={{
+                background: '#fff',
+                border: '4px solid #D4AF37',
+                borderRadius: 24,
+                padding: '32px 48px',
+                textAlign: 'center',
+                boxShadow: '0 0 60px rgba(212,175,55,0.4), 0 20px 60px rgba(0,0,0,0.1)',
+                maxWidth: 600,
+                width: '100%',
+              }}
+            >
+              <div style={{ fontSize: 56, marginBottom: 8 }}>🎉</div>
+              <div style={{ fontSize: 13, color: '#888', textTransform: 'uppercase', letterSpacing: 2, marginBottom: 8 }}>
+                Round {currentRound} Winner
+              </div>
+
+              {/* Big Card Number */}
+              <div style={{
+                fontSize: 96, fontWeight: 900, fontFamily: 'Georgia, serif',
+                background: 'linear-gradient(135deg, #D4AF37, #FFD700, #D4AF37)',
+                WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+                lineHeight: 1, marginBottom: 12,
+              }}>
+                #{winner.serialNo}
+              </div>
+
+              <div style={{ fontSize: 32, fontWeight: 800, color: '#1a1a1a', marginBottom: 4 }}>{winner.name}</div>
+              {winner.department && <div style={{ fontSize: 16, color: '#555', marginBottom: 2 }}>{winner.department}</div>}
+              {winner.designation && <div style={{ fontSize: 14, color: '#888', marginBottom: 16 }}>{winner.designation}</div>}
+
+              {prize && (
+                <div style={{
+                  background: 'linear-gradient(135deg, #C8102E, #8b0000)',
+                  borderRadius: 12, padding: '14px 24px', marginTop: 8,
+                }}>
+                  <div style={{ color: '#FFD700', fontSize: 11, fontWeight: 700, letterSpacing: 2, textTransform: 'uppercase', marginBottom: 4 }}>Prize</div>
+                  <div style={{ color: '#fff', fontSize: 22, fontWeight: 800 }}>{prize.name}</div>
+                  {prize.description && <div style={{ color: '#ffcdd2', fontSize: 14, marginTop: 4 }}>{prize.description}</div>}
+                  {prize.imageUrl && <img src={prize.imageUrl} alt={prize.name} style={{ maxHeight: 80, marginTop: 12, objectFit: 'contain', borderRadius: 8 }} />}
+                </div>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* IDLE / Not started */}
+        {!gameStarted && (
+          <div style={{ textAlign: 'center', padding: '40px 0' }}>
+            <img src={LOGO_ONLY} alt="PG" style={{ height: 100, objectFit: 'contain', marginBottom: 24, opacity: 0.8 }} />
+            <h2 style={{ fontSize: 24, color: '#C8102E', fontFamily: 'Georgia, serif' }}>Waiting for Game to Start...</h2>
+            <p style={{ color: '#888', marginTop: 8 }}>Admin will begin the lucky draw shortly</p>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginTop: 20 }}>
+              {['🪔','✨','🎊','✨','🪔'].map((e, i) => <span key={i} style={{ fontSize: 28 }}>{e}</span>)}
+            </div>
+          </div>
+        )}
+
+        {/* COMPLETED */}
+        {phase === 'completed' && (
+          <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} style={{ textAlign: 'center', padding: '32px 0' }}>
+            <div style={{ fontSize: 64 }}>🎊</div>
+            <h2 style={{ fontSize: 32, color: '#C8102E', fontFamily: 'Georgia, serif' }}>Lucky Draw Complete!</h2>
+            <p style={{ color: '#555', marginTop: 8 }}>All 9 rounds have been drawn. Congratulations to all winners!</p>
+          </motion.div>
+        )}
+
+        {/* Previous Winners Strip */}
+        {prevWinners.length > 0 && (
+          <div style={{ width: '100%', maxWidth: 900 }}>
+            <h3 style={{ fontSize: 14, color: '#888', textAlign: 'center', marginBottom: 10, letterSpacing: 1 }}>PREVIOUS WINNERS</h3>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
+              {prevWinners.map(w => (
+                <div key={w.roundNo} style={{
+                  background: '#fff', border: `1px solid ${GROUP_COLORS[w.group]}`,
+                  borderRadius: 10, padding: '8px 14px', fontSize: 13, textAlign: 'center',
+                  minWidth: 110,
+                }}>
+                  <div style={{ fontSize: 11, color: '#aaa' }}>R{w.roundNo}</div>
+                  <div style={{ fontWeight: 700, color: '#D4AF37', fontSize: 18 }}>#{w.serialNo}</div>
+                  <div style={{ fontWeight: 600, color: '#333', fontSize: 12 }}>{w.name}</div>
+                  {w.prize && <div style={{ fontSize: 11, color: '#C8102E', marginTop: 2 }}>{w.prize.name}</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Decorative bottom */}
+        <div style={{ textAlign: 'center', padding: '12px 0 24px', color: '#ccc', fontSize: 12 }}>
+          🪔 PG Group — Grand Diwali Lucky Draw 2024 🪔
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes flicker {
+          0%, 100% { opacity: 1; transform: scale(1); }
+          50% { opacity: 0.85; transform: scale(1.08) rotate(3deg); }
+        }
+      `}</style>
+    </div>
+  );
+}

@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --pg-red: #C8102E;
+  --pg-gold: #D4AF37;
+  --pg-dark: #1a1a1a;
+}
+
+/* Drum roll slot machine */
+.drum-window {
+  overflow: hidden;
+  height: 120px;
+  position: relative;
+}
+
+.drum-strip {
+  display: flex;
+  flex-direction: column;
+  animation: drumRoll linear infinite;
+  will-change: transform;
+}
+
+.drum-strip.slowing {
+  animation-play-state: running;
+}
+
+.drum-strip.stopped {
+  animation: none;
+}
+
+@keyframes drumRoll {
+  0% { transform: translateY(0); }
+  100% { transform: translateY(-50%); }
+}
+
+/* Golden shimmer on winner number */
+.winner-number {
+  background: linear-gradient(135deg, #D4AF37, #FFD700, #D4AF37);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmer 2s linear infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: 0% center; }
+  100% { background-position: 200% center; }
+}
+
+/* Diwali diya flicker */
+@keyframes flicker {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.85; transform: scale(1.05) rotate(2deg); }
+}
+
+.diya { animation: flicker 0.8s ease-in-out infinite; }
+
+/* Sparkle */
+@keyframes sparkle {
+  0% { transform: scale(0) rotate(0deg); opacity: 1; }
+  100% { transform: scale(1.5) rotate(180deg); opacity: 0; }
+}
+
+.sparkle { animation: sparkle 0.6s ease-out forwards; }
+
+/* Soft scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #f5f5f5; }
+::-webkit-scrollbar-thumb { background: #C8102E44; border-radius: 3px; }
