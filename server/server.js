@@ -23,6 +23,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/employees', require('./routes/employees'));
 app.use('/api/prizes', require('./routes/prizes'));
+app.use('/api/cards', require('./routes/cards'));
 app.use('/api/game', require('./routes/game'));
 
 // Socket.IO

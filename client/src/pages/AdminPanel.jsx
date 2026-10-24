@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  Layout, Menu, Button, Upload, Table, Tag, Form, Input,
-  message, Popconfirm, Card, Statistic, Row, Col, Badge, Space, Alert
+  Layout, Menu, Button, Upload, Table, Tag, Form, Input, InputNumber,
+  message, Popconfirm, Card, Statistic, Row, Col, Badge, Space, Alert, Modal
 } from 'antd';
 import {
   UploadOutlined, PlayCircleOutlined, StepForwardOutlined,
@@ -10,6 +10,7 @@ import {
 } from '@ant-design/icons';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
+import { QRCodeSVG } from 'qrcode.react';
 
 const { Header, Sider, Content } = Layout;
 const LOGO = 'https://cms-complaint-avidence.s3.eu-north-1.amazonaws.com/pg-logo-Photoroom.png';
@@ -22,6 +23,268 @@ function roundToGroup(r) {
   if (r <= 3) return 1;
   if (r <= 6) return 2;
   return 3;
+}
+
+function CardsTab() {
+  const [total, setTotal]       = React.useState('');
+  const [config, setConfig]     = React.useState(null);
+  const [saving, setSaving]     = React.useState(false);
+  const [showCards, setShow]    = React.useState(false);
+  const [previewCard, setPreviewCard] = React.useState(null); // holds the card number
+  const token = localStorage.getItem('pg_admin_token');
+  const headers = { Authorization: `Bearer ${token}` };
+  const { QRCodeSVG } = window.QRCode || {};
+
+  React.useEffect(() => {
+    axios.get('/api/cards/config', { headers }).then(r => {
+      setConfig(r.data);
+      if (r.data?.totalCards) { setTotal(String(r.data.totalCards)); setShow(true); }
+    }).catch(() => {});
+  }, []);
+
+  const saveConfig = async () => {
+    const n = parseInt(total);
+    if (!n || n < 1) return message.warning('Enter a valid number');
+    setSaving(true);
+    try {
+      const r = await axios.post('/api/cards/config', { totalCards: n }, { headers });
+      setConfig(r.data);
+      setShow(true);
+      message.success(`${n} cards configured!`);
+    } catch (e) { message.error('Failed to save'); }
+    setSaving(false);
+  };
+
+  const doPrint = () => window.print();
+
+  const totalCards = config?.totalCards || 0;
+  const groupSize  = config?.groupSize  || 0;
+
+  return (
+    <>
+      {/* Print styles */}
+      <style>{`
+        @media print {
+          body > *:not(#cards-print-root) { display: none !important; }
+          #cards-print-root { display: block !important; }
+          .no-print { display: none !important; }
+          @page { size: A4; margin: 8mm; }
+        }
+        #cards-print-root { display: none; }
+        .visit-card {
+          width: 85mm; height: 54mm;
+          display: inline-flex; flex-direction: column;
+          align-items: center; justify-content: space-between;
+          padding: 5mm 6mm;
+          border: 1.5px solid #D4AF37;
+          border-radius: 4mm;
+          box-sizing: border-box;
+          background: #fff;
+          page-break-inside: avoid;
+          font-family: Arial, sans-serif;
+          margin: 2mm;
+          vertical-align: top;
+        }
+      `}</style>
+
+      {/* Admin UI — hidden during print */}
+      <div className="no-print">
+        <h2 style={{ marginBottom: 16 }}>🃏 QR Visiting Cards</h2>
+
+        {/* Config row */}
+        <Card style={{ marginBottom: 20 }}>
+          <Row gutter={12} align="middle" wrap>
+            <Col>
+              <InputNumber
+                min={1} max={9999} size="large"
+                value={total ? parseInt(total) : undefined}
+                onChange={v => setTotal(String(v || ''))}
+                placeholder="Total headcount e.g. 573"
+                style={{ width: 240 }}
+              />
+            </Col>
+            <Col>
+              <Button type="primary" size="large" loading={saving} onClick={saveConfig}
+                style={{ background: '#C8102E', borderColor: '#C8102E' }}>
+                ✅ Set & Configure
+              </Button>
+            </Col>
+            {totalCards > 0 && (
+              <Col>
+                <Button size="large" onClick={doPrint}
+                  style={{ background: '#D4AF37', borderColor: '#D4AF37', color: '#000', fontWeight: 700 }}>
+                  🖨️ Print All {totalCards} Cards
+                </Button>
+              </Col>
+            )}
+          </Row>
+          {totalCards > 0 && (
+            <div style={{ marginTop: 10, color: '#666', fontSize: 13 }}>
+              Group A: <b>1 – {groupSize}</b> &nbsp;|&nbsp;
+              Group B: <b>{groupSize + 1} – {groupSize * 2}</b> &nbsp;|&nbsp;
+              Group C: <b>{groupSize * 2 + 1} – {totalCards}</b>
+            </div>
+          )}
+        </Card>
+
+        {/* Preview grid */}
+        {showCards && totalCards > 0 && (
+          <>
+            <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
+              <span style={{ fontWeight: 700, fontSize: 15 }}>Preview — {totalCards} Cards</span>
+              <span style={{ color: '#888', fontSize: 13 }}>(showing first 12 · all {totalCards} will print)</span>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+              {Array.from({ length: Math.min(12, totalCards) }, (_, i) => i + 1).map(num => (
+                <div key={num} onClick={() => setPreviewCard(num)}
+                  style={{ cursor: 'pointer', transition: 'transform 0.2s', display: 'inline-flex' }}
+                  onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.04)'}
+                  onMouseLeave={e => e.currentTarget.style.transform = 'scale(1)'}
+                  title="Click to preview"
+                >
+                  <CardFace num={num} total={totalCards} groupSize={groupSize} />
+                </div>
+              ))}
+              {totalCards > 12 && (
+                <div style={{
+                  width: 260, height: 165, border: '2px dashed #ddd', borderRadius: 12,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  color: '#aaa', fontSize: 14, flexDirection: 'column', gap: 4
+                }}>
+                  <span style={{ fontSize: 28 }}>+{totalCards - 12}</span>
+                  <span>more cards</span>
+                  <span style={{ fontSize: 12 }}>will print</span>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Print area — all cards */}
+      {showCards && totalCards > 0 && (
+        <div id="cards-print-root">
+          {Array.from({ length: totalCards }, (_, i) => i + 1).map(num => (
+            <CardFace key={num} num={num} total={totalCards} groupSize={groupSize} print />
+          ))}
+        </div>
+      )}
+
+      <Modal
+        open={previewCard !== null}
+        onCancel={() => setPreviewCard(null)}
+        footer={null}
+        centered
+        width={520}
+        title={`Card Preview — Scan QR to verify`}
+      >
+        {previewCard && (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 24, padding: '20px 0' }}>
+            {/* Big card preview */}
+            <div style={{
+              transform: 'scale(1.6)', transformOrigin: 'top center',
+              marginBottom: 80,
+            }}>
+              <CardFace num={previewCard} total={totalCards} groupSize={groupSize} />
+            </div>
+
+            {/* Navigation buttons */}
+            <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 8 }}>
+              <Button
+                disabled={previewCard <= 1}
+                onClick={() => setPreviewCard(p => p - 1)}
+              >← Prev</Button>
+              <span style={{ fontWeight: 700, fontSize: 16, minWidth: 80, textAlign: 'center' }}>
+                #{previewCard} of {totalCards}
+              </span>
+              <Button
+                disabled={previewCard >= totalCards}
+                onClick={() => setPreviewCard(p => p + 1)}
+              >Next →</Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+    </>
+  );
+}
+
+// Single card face — used both in preview and print
+function CardFace({ num, total, groupSize, print }) {
+  const DIWALI_IMG = 'https://cdn.pixabay.com/photo/2017/10/17/18/37/diwali-2861073_640.png';
+
+  const cardStyle = print ? {
+    display: 'inline-flex', flexDirection: 'column',
+    alignItems: 'center', justifyContent: 'space-between',
+    width: '85mm', height: '54mm', padding: '4mm 5mm',
+    border: '2px solid #D4AF37', borderRadius: '3mm',
+    boxSizing: 'border-box', background: '#fff',
+    fontFamily: 'Arial, sans-serif', margin: '2mm',
+    verticalAlign: 'top', pageBreakInside: 'avoid',
+  } : {
+    display: 'inline-flex', flexDirection: 'column',
+    alignItems: 'center', justifyContent: 'space-between',
+    width: 260, height: 165, padding: '10px 14px',
+    border: '2px solid #D4AF37', borderRadius: 10,
+    background: '#fff', boxShadow: '0 4px 16px rgba(212,175,55,0.25)',
+    fontFamily: 'Arial, sans-serif', boxSizing: 'border-box',
+  };
+
+  return (
+    <div style={cardStyle}>
+
+      {/* TOP ROW: PG Logo + Title */}
+      <div style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <img
+          src="https://cms-complaint-avidence.s3.eu-north-1.amazonaws.com/pg-logo-Photoroom.png"
+          alt="PG" style={{ height: print ? '9mm' : 26, objectFit: 'contain' }}
+        />
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: print ? '7pt' : 10, color: '#C8102E', fontWeight: 900, letterSpacing: 0.5 }}>
+            GRAND DIWALI LUCKY DRAW
+          </div>
+          <div style={{ fontSize: print ? '5pt' : 8, color: '#888' }}>2026 · PG Group</div>
+        </div>
+        <span style={{ fontSize: print ? '16pt' : 24 }}>🪔</span>
+      </div>
+
+      {/* MIDDLE ROW: Greeting + QR */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+        <div style={{ flex: 1, textAlign: 'center' }}>
+          <div style={{ fontSize: print ? '9pt' : 13, fontWeight: 800, color: '#D4AF37', fontFamily: 'Georgia, serif' }}>
+            🪔 शुभ दीपावली 🪔
+          </div>
+          <div style={{ fontSize: print ? '6pt' : 9, color: '#C8102E', fontWeight: 600, marginTop: 3 }}>
+            Happy Diwali
+          </div>
+          <div style={{ fontSize: print ? '5pt' : 8, color: '#888', marginTop: 2 }}>
+            PG Group — Celebrating Together
+          </div>
+          <div style={{ fontSize: print ? '5pt' : 8, color: '#555', marginTop: 3, fontStyle: 'italic', lineHeight: 1.3 }}>
+            PG Family Wishing you a bright new chapter and a prosperous year ahead.
+          </div>
+        </div>
+
+        {/* QR only — no number text */}
+        <div style={{ flexShrink: 0, padding: print ? '0 0 0 3mm' : '0 0 0 10px' }}>
+          <QRCodeSVGWrapper value={String(num)} size={print ? 52 : 68} />
+        </div>
+      </div>
+
+      {/* BOTTOM: scan instruction */}
+      <div style={{ width: '100%', textAlign: 'center' }}>
+        <div style={{ fontSize: print ? '4.5pt' : 7, color: '#aaa', borderTop: '1px solid #f0e0b0', paddingTop: print ? '1mm' : 4 }}>
+          Scan QR to know your lucky draw number
+        </div>
+      </div>
+
+    </div>
+  );
+}
+
+// QR wrapper that works whether qrcode.react is imported or not
+function QRCodeSVGWrapper({ value, size }) {
+  return <QRCodeSVG value={String(value)} size={size} level="M" includeMargin={false} />;
 }
 
 // ── PrizesTab component ─────────────────────────────────────────────
@@ -300,8 +563,15 @@ export default function AdminPanel() {
   };
 
   const startGame = async () => {
-    try { await axios.post('/api/game/start', {}, auth()); message.success('Game started!'); loadState(); }
-    catch (e) { message.error(e.response?.data?.message || 'Error'); }
+    try { 
+      await axios.post('/api/game/start', {}, auth()); 
+      message.success('Game started!'); 
+      loadState(); 
+    }
+    catch (e) { 
+      console.error('Start Game Error:', e.response?.data || e);
+      message.error(e.response?.data?.message || 'Error starting game'); 
+    }
   };
 
   const spin = async () => {
@@ -362,6 +632,7 @@ export default function AdminPanel() {
             onClick={({ key }) => setPage(key)}
             items={[
               { key: 'game', icon: <PlayCircleOutlined />, label: 'Game Control' },
+              { key: 'cards', icon: <span style={{ fontSize: 16 }}>🃏</span>, label: 'Cards' },
               { key: 'prizes', icon: <GiftOutlined />, label: 'Prizes' },
               { key: 'winners', icon: <TrophyOutlined />, label: 'Winners' },
               { key: 'employees', icon: <TeamOutlined />, label: 'Employees' },
@@ -419,12 +690,57 @@ export default function AdminPanel() {
                         return (
                           <div key={r} style={{ padding: '8px 12px', borderRadius: 8, border: `2px solid ${r === currentRound ? '#C8102E' : w ? '#52c41a' : '#e0e0e0'}`, background: r === currentRound ? '#fff0f0' : w ? '#f6ffed' : '#fafafa', minWidth: 90 }}>
                             <div style={{ fontSize: 11, color: '#888' }}>R{r} · {GROUP_LABELS[roundToGroup(r)]}</div>
-                            {w ? <div style={{ fontSize: 11, fontWeight: 600, color: '#52c41a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 85 }}>{w.employee?.name}</div>
+                            {w ? <div style={{ fontSize: 11, fontWeight: 600, color: '#52c41a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 85 }}>#{w.winnerNumber}</div>
                               : <div style={{ fontSize: 11, color: '#bbb' }}>{r === currentRound ? '← now' : '—'}</div>}
                           </div>
                         );
                       })}
                     </div>
+
+                    {gameState?.status === 'revealed' && (
+                      <div style={{
+                        margin: '16px 0',
+                        padding: '14px 20px',
+                        background: '#fff8e6',
+                        border: '2px dashed #D4AF37',
+                        borderRadius: 10,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 16,
+                      }}>
+                        <div>
+                          <div style={{ fontWeight: 700, color: '#8B6914', fontSize: 14 }}>
+                            ⚠️ Winner not present?
+                          </div>
+                          <div style={{ color: '#888', fontSize: 12, marginTop: 2 }}>
+                            If the card holder is absent or card is missing, spin again for a new winner.
+                            The previous number will be excluded.
+                          </div>
+                        </div>
+                        <Button
+                          danger
+                          size="large"
+                          loading={spinning}
+                          onClick={async () => {
+                            setSpinning(true);
+                            try {
+                              await axios.post('/api/game/spin-again', {}, {
+                                headers: { Authorization: `Bearer ${localStorage.getItem('pg_admin_token')}` }
+                              });
+                              message.info('Spinning again for Round ' + gameState.currentRound);
+                            } catch (e) {
+                              message.error(e.response?.data?.message || 'Error');
+                            }
+                            setSpinning(false);
+                          }}
+                          style={{ whiteSpace: 'nowrap', minWidth: 140 }}
+                        >
+                          🔄 Spin Again
+                        </Button>
+                      </div>
+                    )}
+
                     <Space size="middle">
                       <Button
                         type="primary" size="large" icon={<PlayCircleOutlined />}
@@ -447,8 +763,8 @@ export default function AdminPanel() {
                   <div style={{ textAlign: 'center', padding: '32px 0' }}>
                     <div style={{ fontSize: 48, marginBottom: 12 }}>🪔</div>
                     {summary.total === 0
-                      ? <p style={{ color: '#888', marginBottom: 16 }}>Upload employees CSV first to start.</p>
-                      : <p style={{ color: '#555', marginBottom: 16 }}><strong>{summary.total} employees</strong> ready across 3 groups.</p>
+                      ? <p style={{ color: '#888', marginBottom: 16 }}>Configure cards first to start.</p>
+                      : <p style={{ color: '#555', marginBottom: 16 }}><strong>{summary.total} cards</strong> ready across 3 groups.</p>
                     }
                     <Button type="primary" size="large" onClick={startGame} disabled={summary.total === 0}
                       style={{ backgroundColor: '#C8102E', borderColor: '#C8102E', height: 56, paddingInline: 56, fontSize: 20 }}>
@@ -458,6 +774,11 @@ export default function AdminPanel() {
                 )}
               </Card>
             </div>
+          )}
+
+          {/* CARDS */}
+          {page === 'cards' && (
+            <CardsTab />
           )}
 
           {/* PRIZES */}

@@ -1,172 +1,208 @@
 const router = require('express').Router();
 const crypto = require('crypto');
 const auth = require('../middleware/auth');
-const Employee = require('../models/Employee');
-const Prize = require('../models/Prize');
-const Winner = require('../models/Winner');
-const GameState = require('../models/GameState');
+const GameState  = require('../models/GameState');
+const Winner     = require('../models/Winner');
+const Prize      = require('../models/Prize');
+const DrawConfig = require('../models/DrawConfig');
 
-// Attach io to routes via app locals
-const getIo = (req) => req.app.get('io');
+function getGroupRange(group, groupSize, totalCards) {
+  const start = (group - 1) * groupSize + 1;
+  const end   = group === 3 ? totalCards : group * groupSize;
+  return { start, end };
+}
 
-// Which group is active for a given round?
-// Rounds 1-3 → Group 1, 4-6 → Group 2, 7-9 → Group 3
-function roundToGroup(round) {
+function groupForRound(round) {
   if (round <= 3) return 1;
   if (round <= 6) return 2;
   return 3;
 }
 
-// GET current game state + winners
-router.get('/state', async (req, res) => {
-  try {
-    const state = await GameState.findOne({ singleton: 'state' });
-    const winners = await Winner.find()
-      .populate('employee', 'serialNo name department designation employeeId')
-      .populate('prize', 'name description imageUrl')
-      .sort({ roundNo: 1 });
-    res.json({ state, winners });
-  } catch (e) {
-    res.status(500).json({ message: e.message });
-  }
-});
-
-// POST start game (set isActive = true)
+// POST /start
 router.post('/start', auth, async (req, res) => {
   try {
-    const employees = await Employee.countDocuments();
-    if (employees === 0) return res.status(400).json({ message: 'Upload employees first' });
-
-    const state = await GameState.findOneAndUpdate(
+    const io = req.app.get('io');
+    await GameState.findOneAndUpdate(
       { singleton: 'state' },
-      { isActive: true, currentRound: 1, status: 'idle' },
-      { upsert: true, new: true }
+      { isActive: true, status: 'idle', currentRound: 1 },
+      { upsert: true }
     );
-    getIo(req).emit('game:state', { state, type: 'start' });
-    res.json(state);
-  } catch (e) {
-    res.status(500).json({ message: e.message });
-  }
+    io.emit('game:start');
+    res.json({ message: 'Game started successfully' });
+  } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// POST spin — pick random winner for current round
+// POST /spin
 router.post('/spin', auth, async (req, res) => {
   try {
-    const state = await GameState.findOne({ singleton: 'state' });
-    if (!state || !state.isActive) return res.status(400).json({ message: 'Game not started' });
-    if (state.status === 'spinning') return res.status(400).json({ message: 'Already spinning' });
-    if (state.currentRound > 9) return res.status(400).json({ message: 'All rounds completed' });
+    const io     = req.app.get('io');
+    const state  = await GameState.findOne({ singleton: 'state' });
+    const config = await DrawConfig.findOne({ singleton: 'config' });
 
-    const existingWinner = await Winner.findOne({ roundNo: state.currentRound });
-    if (existingWinner) return res.status(400).json({ message: 'Round already has a winner' });
+    if (!state || !config || config.totalCards === 0)
+      return res.status(400).json({ message: 'Configure total cards first' });
+    if (state.status === 'spinning')
+      return res.status(400).json({ message: 'Already spinning' });
 
-    const group = roundToGroup(state.currentRound);
+    const round = state.currentRound;
+    if (round > 9) return res.status(400).json({ message: 'All rounds complete' });
 
-    // Get eligible (not yet won) employees in this group
-    const eligible = await Employee.find({ group, hasWon: false }).select('_id serialNo name department designation employeeId');
-    if (eligible.length === 0) return res.status(400).json({ message: 'No eligible employees in this group' });
+    // Check already drawn this round
+    const existing = await Winner.findOne({ roundNo: round });
+    if (existing) return res.status(400).json({ message: 'Winner already drawn for this round' });
 
-    // Crypto-secure random pick
-    const idx = crypto.randomInt(0, eligible.length);
-    const winner = eligible[idx];
+    const group = groupForRound(round);
+    const { start, end } = getGroupRange(group, config.groupSize, config.totalCards);
 
-    const prize = await Prize.findOne({ roundNo: state.currentRound });
+    // Collect already-won numbers in this group
+    const prevWinners = await Winner.find({ group });
+    const wonNumbers  = new Set(prevWinners.map(w => w.winnerNumber));
 
-    // Update state to spinning
-    await GameState.findOneAndUpdate({ singleton: 'state' }, { status: 'spinning' });
+    // Build available pool
+    const pool = [];
+    for (let n = start; n <= end; n++) {
+      if (!wonNumbers.has(n)) pool.push(n);
+    }
+    if (pool.length === 0)
+      return res.status(400).json({ message: 'No numbers left in this group' });
 
-    // Emit spin start to all live screens
-    getIo(req).emit('game:spin_start', {
-      roundNo: state.currentRound,
-      group,
-      winnerSerial: winner.serialNo,
-      totalInGroup: eligible.length,
-      allSerials: eligible.map(e => e.serialNo), // for drum animation
-    });
+    const winnerNumber = pool[crypto.randomInt(0, pool.length)];
 
-    // After 6 seconds, save winner & emit reveal
+    // Get prize for this round
+    const prize = await Prize.findOne({ roundNo: round });
+
+    await GameState.findOneAndUpdate(
+      { singleton: 'state' },
+      { status: 'spinning' },
+      { upsert: true }
+    );
+
+    io.emit('game:spin_start', { round, group, start, end });
+
     setTimeout(async () => {
-      try {
-        await Employee.findByIdAndUpdate(winner._id, { hasWon: true });
-        const winnerDoc = await Winner.create({
-          roundNo: state.currentRound,
-          group,
-          employee: winner._id,
-          serialNo: winner.serialNo,
-          prize: prize?._id,
-        });
-        await GameState.findOneAndUpdate({ singleton: 'state' }, { status: 'revealed' });
+      const winner = await Winner.create({
+        roundNo: round, group, winnerNumber,
+        prize: prize?._id || null,
+      });
 
-        getIo(req).emit('game:winner_revealed', {
-          roundNo: state.currentRound,
-          group,
-          employee: {
-            serialNo: winner.serialNo,
-            name: winner.name,
-            department: winner.department,
-            designation: winner.designation,
-            employeeId: winner.employeeId,
-          },
-          prize: prize ? { name: prize.name, description: prize.description, imageUrl: prize.imageUrl } : null,
-        });
-      } catch (err) {
-        console.error('Winner save error:', err);
-      }
+      await GameState.findOneAndUpdate(
+        { singleton: 'state' },
+        { status: 'revealed' }
+      );
+
+      io.emit('game:winner_revealed', {
+        round, group, winnerNumber,
+        prize: prize ? { name: prize.name, description: prize.description, imageUrl: prize.imageUrl } : null,
+      });
     }, 6000);
 
-    res.json({ message: 'Spin started', round: state.currentRound, group });
-  } catch (e) {
-    res.status(500).json({ message: e.message });
-  }
+    res.json({ message: 'Spinning started', winnerNumber, round });
+  } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// POST next round
+// POST /next-round
 router.post('/next-round', auth, async (req, res) => {
   try {
+    const io    = req.app.get('io');
     const state = await GameState.findOne({ singleton: 'state' });
-    if (!state) return res.status(400).json({ message: 'Game not started' });
-    if (state.currentRound >= 9) {
-      await GameState.findOneAndUpdate({ singleton: 'state' }, { status: 'completed', isActive: false });
-      getIo(req).emit('game:completed', { message: 'All 9 rounds completed!' });
-      return res.json({ message: 'Game completed' });
-    }
+    if (!state) return res.status(400).json({ message: 'No game state' });
+
     const nextRound = state.currentRound + 1;
-    await GameState.findOneAndUpdate({ singleton: 'state' }, { currentRound: nextRound, status: 'idle' });
-    getIo(req).emit('game:next_round', { round: nextRound, group: roundToGroup(nextRound) });
-    res.json({ currentRound: nextRound });
-  } catch (e) {
-    res.status(500).json({ message: e.message });
-  }
+    if (nextRound > 9) {
+      await GameState.findOneAndUpdate({ singleton: 'state' }, { status: 'completed' });
+      io.emit('game:completed');
+      return res.json({ message: 'All rounds complete' });
+    }
+
+    await GameState.findOneAndUpdate(
+      { singleton: 'state' },
+      { currentRound: nextRound, status: 'idle' }
+    );
+    io.emit('game:next_round', { round: nextRound, group: groupForRound(nextRound) });
+    res.json({ message: `Round ${nextRound} started` });
+  } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// POST reset game (but keep employees & prizes)
+// POST /reset
 router.post('/reset', auth, async (req, res) => {
   try {
+    const io = req.app.get('io');
     await Winner.deleteMany({});
-    await Employee.updateMany({}, { hasWon: false });
     await GameState.findOneAndUpdate(
       { singleton: 'state' },
       { currentRound: 1, status: 'idle', isActive: false },
       { upsert: true }
     );
-    getIo(req).emit('game:reset');
+    io.emit('game:reset');
     res.json({ message: 'Game reset' });
-  } catch (e) {
-    res.status(500).json({ message: e.message });
-  }
+  } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// GET winners list
-router.get('/winners', async (req, res) => {
+// POST /spin-again — redraw same round (previous winner was absent)
+router.post('/spin-again', auth, async (req, res) => {
   try {
-    const winners = await Winner.find()
-      .populate('employee', 'serialNo name department designation employeeId')
-      .populate('prize', 'name description')
-      .sort({ roundNo: 1 });
-    res.json(winners);
-  } catch (e) {
-    res.status(500).json({ message: e.message });
-  }
+    const io     = req.app.get('io');
+    const state  = await GameState.findOne({ singleton: 'state' });
+    const config = await DrawConfig.findOne({ singleton: 'config' });
+
+    if (!state || state.status !== 'revealed')
+      return res.status(400).json({ message: 'Can only spin again after a winner is revealed' });
+
+    const round  = state.currentRound;
+    const group  = groupForRound(round);
+    const { start, end } = getGroupRange(group, config.groupSize, config.totalCards);
+
+    // Remove previous winner for this round so they are excluded
+    await Winner.deleteOne({ roundNo: round });
+
+    // Get all already-won numbers in this group (previous rounds only)
+    const prevWinners = await Winner.find({ group });
+    const wonNumbers  = new Set(prevWinners.map(w => w.winnerNumber));
+
+    const pool = [];
+    for (let n = start; n <= end; n++) {
+      if (!wonNumbers.has(n)) pool.push(n);
+    }
+    if (pool.length === 0)
+      return res.status(400).json({ message: 'No numbers left in this group' });
+
+    const winnerNumber = pool[crypto.randomInt(0, pool.length)];
+    const prize = await Prize.findOne({ roundNo: round });
+
+    await GameState.findOneAndUpdate(
+      { singleton: 'state' },
+      { status: 'spinning' }
+    );
+
+    io.emit('game:spin_start', { round, group, start, end });
+
+    setTimeout(async () => {
+      await Winner.create({
+        roundNo: round, group, winnerNumber,
+        prize: prize?._id || null,
+      });
+      await GameState.findOneAndUpdate(
+        { singleton: 'state' },
+        { status: 'revealed' }
+      );
+      io.emit('game:winner_revealed', {
+        round, group, winnerNumber,
+        prize: prize ? { name: prize.name, description: prize.description, imageUrl: prize.imageUrl } : null,
+      });
+    }, 6000);
+
+    res.json({ message: 'Spinning again...' });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// GET /state
+router.get('/state', auth, async (req, res) => {
+  try {
+    const state   = await GameState.findOne({ singleton: 'state' });
+    const config  = await DrawConfig.findOne({ singleton: 'config' });
+    const winners = await Winner.find().populate('prize').sort({ roundNo: 1 });
+    res.json({ state, config, winners });
+  } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
 module.exports = router;
