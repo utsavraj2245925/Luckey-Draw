@@ -254,9 +254,12 @@ export default function LiveDraw() {
         </div>
         <div style={{ textAlign: 'center' }}>
           <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900, color: '#1a1a1a', fontFamily: 'Georgia, serif', letterSpacing: 1 }}>
-            🪔 Grand Diwali Lucky Draw 2026 🪔
+            PG FORTUNE FIESTA 2026 
           </h1>
-          <p style={{ margin: 0, fontSize: 13, color: '#888', marginTop: 2 }}>PG Group — Celebrating Together</p>
+          <span style={{ margin: 0, fontSize: 20, fontWeight: 700, color: '#1a1a1a',  letterSpacing: 1 }}>
+             💥 The Lucky Legends 💥
+          </span>
+          {/* <p style={{ margin: 0, fontSize: 13, color: '#888', marginTop: 2 }}>PG Group — Celebrating Together</p> */}
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <span style={diyaStyle}>🪔</span>

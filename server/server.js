@@ -26,14 +26,18 @@ app.use('/api/prizes', require('./routes/prizes'));
 app.use('/api/cards', require('./routes/cards'));
 app.use('/api/game', require('./routes/game'));
 
+// ASSUMPTION: `io` is your Socket.IO server instance, available here.
+app.use('/api/guests', require('./routes/guests')(io));
+
 // Socket.IO
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
   socket.on('disconnect', () => console.log('Client disconnected:', socket.id));
 });
 
+
 // MongoDB + Start
-mongoose.connect(process.env.MONGO_URI)
+mongoose.connect(process.env.MONGO_URI || "mongodb://localhost:27017/diwali_lucky_draw")
   .then(() => {
     console.log('MongoDB connected');
     server.listen(process.env.PORT || 5000, () =>
