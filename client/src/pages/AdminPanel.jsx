@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Layout, Menu, Button, Upload, Table, Tag, Form, Input, InputNumber,
-  message, Popconfirm, Card, Statistic, Row, Col, Badge, Space, Alert, Modal
+  message, Popconfirm, Card, Statistic, Row, Col, Badge, Space, Alert, Modal, Select, Tooltip
 } from 'antd';
 import {
   UploadOutlined, PlayCircleOutlined, StepForwardOutlined,
   TrophyOutlined, TeamOutlined, GiftOutlined, LogoutOutlined,
-  ReloadOutlined, EyeOutlined
+  ReloadOutlined, EyeOutlined, DeleteOutlined, EditOutlined,
+  FileExcelOutlined, DownloadOutlined, SearchOutlined
 } from '@ant-design/icons';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
@@ -460,56 +461,434 @@ function AddEmployeeForm({ onAdded }) {
   );
 }
 
-function EmployeeTable({ onDeleted }) {
+function EmployeesTab({ summary, onRefresh }) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [clearingAll, setClearingAll] = useState(false);
+  const [uploadMode, setUploadMode] = useState('replace');
+  const [searchText, setSearchText] = useState('');
+  const [selectedGroup, setSelectedGroup] = useState('all');
+  const [selectedRowKeys, setSelectedRowKeys] = useState([]);
+  const [batchDeleting, setBatchDeleting] = useState(false);
 
-  const load = () => {
+  // Edit employee modal
+  const [editingEmployee, setEditingEmployee] = useState(null);
+  const [editModalVisible, setEditModalVisible] = useState(false);
+  const [editForm] = Form.useForm();
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  const load = useCallback(() => {
     setLoading(true);
-    axios.get('/api/employees',
-      { headers: { Authorization: `Bearer ${localStorage.getItem('pg_admin_token')}` } })
+    axios.get('/api/employees', auth())
       .then(r => setData(r.data))
+      .catch(() => message.error('Failed to load employees'))
       .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleUpload = async ({ file }) => {
+    setUploading(true);
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('mode', uploadMode);
+    try {
+      const { data: res } = await axios.post('/api/employees/upload', fd, auth());
+      message.success(res.message || `${res.total} employees uploaded successfully!`);
+      setSelectedRowKeys([]);
+      load();
+      if (onRefresh) onRefresh();
+    } catch (e) {
+      message.error(e.response?.data?.message || 'Upload failed');
+    } finally {
+      setUploading(false);
+    }
+    return false;
   };
 
-  useEffect(() => { load(); }, []);
+  const downloadSampleTemplate = () => {
+    const csvContent =
+      "Name of Employee,Pay Code,Unit,Gender,Department,Designation\n" +
+      "Rahul Sharma,PT200001,PGTL,MALE,PAINT SHOP,Manager\n" +
+      "Priya Patel,PT200002,NGM,FEMALE,QUALITY,Executive\n" +
+      "Amit Kumar,PT200003,PGTL,MALE,PRODUCTION,Supervisor\n";
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', 'employee_sample_template.csv');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
   const handleDelete = async (id) => {
     try {
-      await axios.delete(`/api/employees/${id}`,
-        { headers: { Authorization: `Bearer ${localStorage.getItem('pg_admin_token')}` } });
-      message.success('Deleted');
+      await axios.delete(`/api/employees/${id}`, auth());
+      message.success('Employee deleted directly from database');
       load();
-      if (onDeleted) onDeleted();
-    } catch { message.error('Delete failed'); }
+      if (onRefresh) onRefresh();
+    } catch (e) {
+      message.error(e.response?.data?.message || 'Delete failed');
+    }
   };
+
+  const handleBatchDelete = async () => {
+    if (!selectedRowKeys.length) return;
+    setBatchDeleting(true);
+    try {
+      const { data: res } = await axios.post('/api/employees/batch-delete', { ids: selectedRowKeys }, auth());
+      message.success(res.message || 'Selected employees deleted from database');
+      setSelectedRowKeys([]);
+      load();
+      if (onRefresh) onRefresh();
+    } catch (e) {
+      message.error(e.response?.data?.message || 'Batch delete failed');
+    } finally {
+      setBatchDeleting(false);
+    }
+  };
+
+  const handleClearAll = async () => {
+    setClearingAll(true);
+    try {
+      await axios.delete('/api/employees/all', auth());
+      message.success('All employees permanently cleared from database');
+      setData([]);
+      setSelectedRowKeys([]);
+      load();
+      if (onRefresh) onRefresh();
+    } catch (e) {
+      message.error(e.response?.data?.message || 'Failed to clear employees');
+    } finally {
+      setClearingAll(false);
+    }
+  };
+
+  const openEditModal = (record) => {
+    setEditingEmployee(record);
+    editForm.setFieldsValue({
+      name: record.name,
+      payCode: record.payCode,
+      unit: record.unit,
+      gender: record.gender,
+      department: record.department,
+      designation: record.designation,
+    });
+    setEditModalVisible(true);
+  };
+
+  const handleSaveEdit = async () => {
+    try {
+      const values = await editForm.validateFields();
+      setSavingEdit(true);
+      await axios.put(`/api/employees/${editingEmployee._id}`, values, auth());
+      message.success('Employee updated in database');
+      setEditModalVisible(false);
+      setEditingEmployee(null);
+      load();
+      if (onRefresh) onRefresh();
+    } catch (e) {
+      if (e.response?.data?.message) {
+        message.error(e.response.data.message);
+      }
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const filteredData = data.filter(item => {
+    const matchesGroup = selectedGroup === 'all' || String(item.group) === String(selectedGroup);
+    if (!matchesGroup) return false;
+    if (!searchText.trim()) return true;
+    const q = searchText.toLowerCase();
+    return (
+      (item.name && item.name.toLowerCase().includes(q)) ||
+      (item.payCode && item.payCode.toLowerCase().includes(q)) ||
+      (item.department && item.department.toLowerCase().includes(q)) ||
+      (item.designation && item.designation.toLowerCase().includes(q)) ||
+      (item.unit && item.unit.toLowerCase().includes(q)) ||
+      (String(item.serialNo).includes(q))
+    );
+  });
 
   const GROUP_COLORS = { 1: 'blue', 2: 'purple', 3: 'green' };
   const cols = [
-    { title: '#', dataIndex: 'serialNo', width: 55 },
-    { title: 'Group', dataIndex: 'group', width: 80,
-      render: g => <Tag color={GROUP_COLORS[g]}>Grp {['A','B','C'][g-1]}</Tag> },
-    { title: 'Pay Code', dataIndex: 'payCode', width: 100 },
-    { title: 'Name', dataIndex: 'name' },
-    { title: 'Unit', dataIndex: 'unit', width: 70 },
-    { title: 'Gender', dataIndex: 'gender', width: 75 },
-    { title: 'Department', dataIndex: 'department' },
-    { title: 'Designation', dataIndex: 'designation' },
-    { title: 'Won', dataIndex: 'hasWon', width: 70,
-      render: v => v ? <Tag color="gold">🏆</Tag> : '—' },
-    { title: '', width: 60,
+    { title: '#', dataIndex: 'serialNo', width: 60, sorter: (a, b) => a.serialNo - b.serialNo },
+    {
+      title: 'Group',
+      dataIndex: 'group',
+      width: 90,
+      render: g => <Tag color={GROUP_COLORS[g] || 'default'}>Grp {['A', 'B', 'C'][g - 1] || g}</Tag>,
+      filters: [
+        { text: 'Group A', value: 1 },
+        { text: 'Group B', value: 2 },
+        { text: 'Group C', value: 3 },
+      ],
+      onFilter: (value, record) => record.group === value,
+    },
+    { title: 'Pay Code', dataIndex: 'payCode', width: 110 },
+    { title: 'Name', dataIndex: 'name', ellipsis: true },
+    { title: 'Unit', dataIndex: 'unit', width: 85 },
+    { title: 'Gender', dataIndex: 'gender', width: 85 },
+    { title: 'Department', dataIndex: 'department', ellipsis: true },
+    { title: 'Designation', dataIndex: 'designation', ellipsis: true },
+    {
+      title: 'Won',
+      dataIndex: 'hasWon',
+      width: 75,
+      render: v => (v ? <Tag color="gold">🏆 Won</Tag> : <span style={{ color: '#bbb' }}>—</span>),
+    },
+    {
+      title: 'Action',
+      width: 140,
       render: (_, r) => (
-        <Popconfirm title="Delete this employee?" onConfirm={() => handleDelete(r._id)}>
-          <Button size="small" danger type="link">Del</Button>
-        </Popconfirm>
-      )
+        <Space size="small">
+          <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEditModal(r)}>
+            Edit
+          </Button>
+          <Popconfirm
+            title="Delete this employee?"
+            description={`Delete ${r.name} (#${r.serialNo}) directly from database?`}
+            onConfirm={() => handleDelete(r._id)}
+            okText="Yes, Delete"
+            okType="danger"
+            cancelText="Cancel"
+          >
+            <Button size="small" danger type="link" icon={<DeleteOutlined />}>
+              Del
+            </Button>
+          </Popconfirm>
+        </Space>
+      ),
     },
   ];
 
+  const rowSelection = {
+    selectedRowKeys,
+    onChange: setSelectedRowKeys,
+  };
+
   return (
-    <Table dataSource={data} columns={cols} rowKey="_id" loading={loading}
-      pagination={{ pageSize: 20 }} size="small"
-      rowClassName={r => r.hasWon ? 'bg-yellow-50' : ''} />
+    <div style={{ maxWidth: 1050, margin: '0 auto' }}>
+      {/* 1. Statistics Cards */}
+      <Row gutter={16} style={{ marginBottom: 16 }}>
+        {[
+          { label: 'Total Employees', value: summary?.total || data.length, color: '#C8102E' },
+          { label: 'Group A', value: summary?.groups?.[1] || 0, color: '#1677ff' },
+          { label: 'Group B', value: summary?.groups?.[2] || 0, color: '#722ed1' },
+          { label: 'Group C', value: summary?.groups?.[3] || 0, color: '#52c41a' },
+        ].map(s => (
+          <Col span={6} key={s.label}>
+            <Card bodyStyle={{ padding: '16px 20px' }}>
+              <Statistic
+                title={<span style={{ fontWeight: 600 }}>{s.label}</span>}
+                value={s.value}
+                valueStyle={s.color ? { color: s.color, fontWeight: 700 } : {}}
+              />
+            </Card>
+          </Col>
+        ))}
+      </Row>
+
+      {/* 2. Relocated Upload Employees (Excel / CSV) */}
+      <Card
+        title={
+          <Space>
+            <FileExcelOutlined style={{ color: '#52c41a', fontSize: 18 }} />
+            <span style={{ fontWeight: 600 }}>Upload Employees (Excel / CSV)</span>
+          </Space>
+        }
+        extra={
+          <Button icon={<DownloadOutlined />} size="small" onClick={downloadSampleTemplate}>
+            Download Sample CSV
+          </Button>
+        }
+        style={{ marginBottom: 16 }}
+      >
+        <p style={{ color: '#666', marginBottom: 14, fontSize: 13 }}>
+          Upload your <b>Excel (.xlsx, .xls)</b> or <b>CSV</b> file. Serial numbers (1 to N) and 3 equal groups (A, B, C) are automatically assigned.
+          <br />
+          <span style={{ color: '#888' }}>
+            Supported columns: <code>Name of Employee</code> (or <code>Name</code>), <code>Pay Code</code>, <code>Unit</code>, <code>Gender</code>, <code>Department</code>, <code>Designation</code>.
+          </span>
+        </p>
+
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 16 }}>
+          <Upload
+            beforeUpload={f => { handleUpload({ file: f }); return false; }}
+            showUploadList={false}
+            accept=".csv, .xlsx, .xls, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel"
+          >
+            <Button
+              icon={<UploadOutlined />}
+              loading={uploading}
+              style={{ backgroundColor: '#C8102E', borderColor: '#C8102E', color: '#fff' }}
+              size="large"
+            >
+              {uploading ? 'Processing & Uploading...' : 'Upload Excel / CSV'}
+            </Button>
+          </Upload>
+
+          <Space align="center">
+            <span style={{ fontSize: 13, color: '#555', fontWeight: 600 }}>Upload Mode:</span>
+            <Select
+              value={uploadMode}
+              onChange={setUploadMode}
+              style={{ width: 230 }}
+              options={[
+                { value: 'replace', label: '🔄 Replace Database (Fresh list)' },
+                { value: 'append', label: '➕ Append to Existing List' },
+              ]}
+            />
+          </Space>
+        </div>
+      </Card>
+
+      {/* 3. Add Employee Manually */}
+      <Card title="➕ Add Employee Manually" style={{ marginBottom: 16 }}>
+        <AddEmployeeForm onAdded={() => { load(); if (onRefresh) onRefresh(); }} />
+      </Card>
+
+      {/* 4. CRUD Table */}
+      <Card
+        title={`👥 Employees (${filteredData.length} ${filteredData.length !== data.length ? `filtered of ${data.length}` : 'total'})`}
+        extra={
+          <Space>
+            <Button
+              icon={<ReloadOutlined />}
+              size="small"
+              onClick={() => { load(); if (onRefresh) onRefresh(); }}
+              loading={loading}
+            >
+              Refresh
+            </Button>
+            {selectedRowKeys.length > 0 && (
+              <Popconfirm
+                title={`Delete ${selectedRowKeys.length} selected employee(s)?`}
+                description="This will permanently delete them directly from the database and recalculate serial numbers."
+                onConfirm={handleBatchDelete}
+                okText="Yes, Delete"
+                okType="danger"
+                cancelText="Cancel"
+              >
+                <Button danger type="primary" loading={batchDeleting} size="small" icon={<DeleteOutlined />}>
+                  Delete Selected ({selectedRowKeys.length})
+                </Button>
+              </Popconfirm>
+            )}
+            <Popconfirm
+              title="Permanently Clear ALL Employees?"
+              description="This will delete every employee and winner record directly from the MongoDB database!"
+              onConfirm={handleClearAll}
+              okText="Yes, Delete All"
+              okType="danger"
+              cancelText="Cancel"
+            >
+              <Button danger size="small" loading={clearingAll}>Clear All</Button>
+            </Popconfirm>
+          </Space>
+        }
+      >
+        {/* Search & Filter Toolbar */}
+        <Row gutter={12} style={{ marginBottom: 16 }} align="middle">
+          <Col xs={24} sm={12} md={10}>
+            <Input
+              placeholder="Search by Name, Pay Code, Dept, Unit..."
+              prefix={<SearchOutlined style={{ color: '#bbb' }} />}
+              value={searchText}
+              onChange={e => setSearchText(e.target.value)}
+              allowClear
+            />
+          </Col>
+          <Col xs={24} sm={12} md={8}>
+            <Select
+              value={selectedGroup}
+              onChange={setSelectedGroup}
+              style={{ width: '100%' }}
+              options={[
+                { value: 'all', label: 'All Groups' },
+                { value: '1', label: 'Group A only' },
+                { value: '2', label: 'Group B only' },
+                { value: '3', label: 'Group C only' },
+              ]}
+            />
+          </Col>
+          {searchText && (
+            <Col xs={24} sm={24} md={6}>
+              <Button onClick={() => setSearchText('')} size="small">
+                Reset Filter
+              </Button>
+            </Col>
+          )}
+        </Row>
+
+        <Table
+          rowSelection={rowSelection}
+          dataSource={filteredData}
+          columns={cols}
+          rowKey="_id"
+          loading={loading}
+          pagination={{ pageSize: 20, showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'] }}
+          size="small"
+          rowClassName={r => (r.hasWon ? 'bg-yellow-50' : '')}
+        />
+      </Card>
+
+      {/* 5. Edit Employee Modal */}
+      <Modal
+        title={`✏️ Edit Employee (#${editingEmployee?.serialNo || ''} - ${editingEmployee?.name || ''})`}
+        open={editModalVisible}
+        onOk={handleSaveEdit}
+        confirmLoading={savingEdit}
+        onCancel={() => { setEditModalVisible(false); setEditingEmployee(null); }}
+        okText="Save Changes to Database"
+        cancelText="Cancel"
+        destroyOnClose
+      >
+        <Form form={editForm} layout="vertical" style={{ marginTop: 16 }}>
+          <Form.Item name="name" label="Full Name" rules={[{ required: true, message: 'Name is required' }]}>
+            <Input placeholder="Employee Name" />
+          </Form.Item>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item name="payCode" label="Pay Code">
+                <Input placeholder="e.g. PT200016" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="unit" label="Unit">
+                <Input placeholder="e.g. PGTL / NGM" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item name="gender" label="Gender">
+                <Select
+                  allowClear
+                  placeholder="Select Gender"
+                  options={[
+                    { value: 'MALE', label: 'MALE' },
+                    { value: 'FEMALE', label: 'FEMALE' },
+                    { value: 'OTHER', label: 'OTHER' },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="department" label="Department">
+                <Input placeholder="e.g. PAINT SHOP, IDU" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item name="designation" label="Designation">
+            <Input placeholder="e.g. Manager, Executive, Operator" />
+          </Form.Item>
+        </Form>
+      </Modal>
+    </div>
   );
 }
 
@@ -522,7 +901,6 @@ export default function AdminPanel() {
   const [prizes, setPrizes] = useState(Array.from({ length: 9 }, (_, i) => ({ roundNo: i + 1, name: '', description: '', imageUrl: '' })));
   const [isEditingPrizes, setIsEditingPrizes] = useState(false);
   const [spinning, setSpinning] = useState(false);
-  const [uploading, setUploading] = useState(false);
   const [prizeForm] = Form.useForm();
 
   const loadState = useCallback(async () => {
@@ -549,18 +927,6 @@ export default function AdminPanel() {
   }, []);
 
   useEffect(() => { loadState(); const t = setInterval(loadState, 5000); return () => clearInterval(t); }, []);
-
-  const handleUpload = async ({ file }) => {
-    setUploading(true);
-    const fd = new FormData(); fd.append('file', file);
-    try {
-      const { data } = await axios.post('/api/employees/upload', fd, auth());
-      message.success(`${data.total} employees uploaded! ~${data.groupSize} per group.`);
-      loadState();
-    } catch (e) { message.error(e.response?.data?.message || 'Upload failed'); }
-    finally { setUploading(false); }
-    return false;
-  };
 
   const startGame = async () => {
     try { 
@@ -657,17 +1023,6 @@ export default function AdminPanel() {
                   </Col>
                 ))}
               </Row>
-
-              <Card title="📂 Upload Employees" style={{ marginBottom: 16 }}>
-                <p style={{ color: '#888', marginBottom: 12, fontSize: 13 }}>
-                  CSV columns: <code>Name, EmployeeId, Department, Designation</code> — serial 1 to N, auto-split into 3 equal groups.
-                </p>
-                <Upload beforeUpload={f => { handleUpload({ file: f }); return false; }} showUploadList={false} accept=".csv">
-                  <Button icon={<UploadOutlined />} loading={uploading} style={{ borderColor: '#C8102E', color: '#C8102E' }} size="large">
-                    Upload CSV
-                  </Button>
-                </Upload>
-              </Card>
 
               <Card
                 title={
@@ -795,25 +1150,7 @@ export default function AdminPanel() {
 
           {/* EMPLOYEES */}
           {page === 'employees' && (
-            <div style={{ maxWidth: 1000, margin: '0 auto' }}>
-              {/* Manual Add Form */}
-              <Card title="➕ Add Employee Manually" style={{ marginBottom: 16 }}>
-                <AddEmployeeForm onAdded={loadState} />
-              </Card>
-
-              <Card title={`👥 Employees (${summary.total} total)`}
-                extra={
-                  <Popconfirm title="Clear ALL employees?" onConfirm={async () => {
-                    await axios.delete('/api/employees/all', auth());
-                    message.success('Cleared'); loadState();
-                  }}>
-                    <Button danger size="small">Clear All</Button>
-                  </Popconfirm>
-                }
-              >
-                <EmployeeTable onDeleted={loadState} />
-              </Card>
-            </div>
+            <EmployeesTab summary={summary} onRefresh={loadState} />
           )}
         </Content>
       </Layout>
