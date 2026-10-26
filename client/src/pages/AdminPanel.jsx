@@ -27,134 +27,231 @@ function roundToGroup(r) {
 }
 
 function CardsTab() {
-  const [total, setTotal]       = React.useState('');
-  const [config, setConfig]     = React.useState(null);
-  const [saving, setSaving]     = React.useState(false);
-  const [showCards, setShow]    = React.useState(false);
-  const [previewCard, setPreviewCard] = React.useState(null); // holds the card number
+  const [employees, setEmployees] = React.useState([]);
+  const [loading, setLoading] = React.useState(false);
+  const [searchText, setSearchText] = React.useState('');
+  const [selectedGroup, setSelectedGroup] = React.useState('all');
+  const [sideView, setSideView] = React.useState('back'); // 'back' | 'front' | 'both'
+  const [printMode, setPrintMode] = React.useState('back'); // 'back' | 'front' | 'both'
+  const [previewEmp, setPreviewEmp] = React.useState(null);
+
   const token = localStorage.getItem('pg_admin_token');
   const headers = { Authorization: `Bearer ${token}` };
-  const { QRCodeSVG } = window.QRCode || {};
 
-  React.useEffect(() => {
-    axios.get('/api/cards/config', { headers }).then(r => {
-      setConfig(r.data);
-      if (r.data?.totalCards) { setTotal(String(r.data.totalCards)); setShow(true); }
-    }).catch(() => {});
+  const loadEmployees = React.useCallback(() => {
+    setLoading(true);
+    axios.get('/api/employees', { headers })
+      .then(r => setEmployees(r.data))
+      .catch(() => message.error('Failed to load employee cards'))
+      .finally(() => setLoading(false));
   }, []);
 
-  const saveConfig = async () => {
-    const n = parseInt(total);
-    if (!n || n < 1) return message.warning('Enter a valid number');
-    setSaving(true);
-    try {
-      const r = await axios.post('/api/cards/config', { totalCards: n }, { headers });
-      setConfig(r.data);
-      setShow(true);
-      message.success(`${n} cards configured!`);
-    } catch (e) { message.error('Failed to save'); }
-    setSaving(false);
+  React.useEffect(() => {
+    loadEmployees();
+  }, [loadEmployees]);
+
+  const doPrint = (mode) => {
+    setPrintMode(mode);
+    setTimeout(() => {
+      window.print();
+    }, 150);
   };
 
-  const doPrint = () => window.print();
+  const totalEmployees = employees.length;
+  const groupSize = Math.ceil(totalEmployees / 3);
 
-  const totalCards = config?.totalCards || 0;
-  const groupSize  = config?.groupSize  || 0;
+  // Filtered employees
+  const filteredEmployees = employees.filter(emp => {
+    const matchesGroup = selectedGroup === 'all' || String(emp.group) === String(selectedGroup);
+    if (!matchesGroup) return false;
+    if (!searchText.trim()) return true;
+    const q = searchText.toLowerCase();
+    return (
+      (emp.name && emp.name.toLowerCase().includes(q)) ||
+      (emp.payCode && emp.payCode.toLowerCase().includes(q)) ||
+      (emp.employeeId && emp.employeeId.toLowerCase().includes(q)) ||
+      (emp.unit && emp.unit.toLowerCase().includes(q)) ||
+      (emp.department && emp.department.toLowerCase().includes(q)) ||
+      String(emp.serialNo).includes(q)
+    );
+  });
 
   return (
     <>
-      {/* Print styles */}
+      {/* Print stylesheet */}
       <style>{`
         @media print {
           body > *:not(#cards-print-root) { display: none !important; }
-          #cards-print-root { display: block !important; }
+          #cards-print-root {
+            display: flex !important;
+            flex-wrap: wrap !important;
+            justify-content: center !important;
+            align-content: flex-start !important;
+            gap: 2mm !important;
+            width: 100% !important;
+          }
           .no-print { display: none !important; }
-          @page { size: A4; margin: 8mm; }
+          @page {
+            size: A4 portrait;
+            margin: 6mm 6mm;
+          }
+          .print-card-unit {
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+            margin: 1.5mm !important;
+          }
         }
         #cards-print-root { display: none; }
-        .visit-card {
-          width: 85mm; height: 54mm;
-          display: inline-flex; flex-direction: column;
-          align-items: center; justify-content: space-between;
-          padding: 5mm 6mm;
-          border: 1.5px solid #D4AF37;
-          border-radius: 4mm;
-          box-sizing: border-box;
-          background: #fff;
-          page-break-inside: avoid;
-          font-family: Arial, sans-serif;
-          margin: 2mm;
-          vertical-align: top;
-        }
       `}</style>
 
       {/* Admin UI — hidden during print */}
       <div className="no-print">
-        <h2 style={{ marginBottom: 16 }}>🃏 QR Visiting Cards</h2>
+        <h2 style={{ marginBottom: 16 }}>🃏 PG Fortune Fiesta — 2-Sided Employee Visiting Cards</h2>
 
-        {/* Config row */}
+        {/* Info & Config Card */}
         <Card style={{ marginBottom: 20 }}>
-          <Row gutter={12} align="middle" wrap>
-            <Col>
-              <InputNumber
-                min={1} max={9999} size="large"
-                value={total ? parseInt(total) : undefined}
-                onChange={v => setTotal(String(v || ''))}
-                placeholder="Total headcount e.g. 573"
-                style={{ width: 240 }}
+          <Row gutter={[16, 16]} align="middle" justify="space-between">
+            <Col xs={24} md={12}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: '#1a1a1a' }}>
+                Total Cards: <span style={{ color: '#C8102E' }}>{totalEmployees} Employees</span>
+              </div>
+              {totalEmployees > 0 ? (
+                <div style={{ marginTop: 6, color: '#666', fontSize: 13 }}>
+                  <Tag color="blue">Group A: 1 – {groupSize}</Tag>
+                  <Tag color="purple">Group B: {groupSize + 1} – {groupSize * 2}</Tag>
+                  <Tag color="green">Group C: {groupSize * 2 + 1} – {totalEmployees}</Tag>
+                </div>
+              ) : (
+                <div style={{ marginTop: 6, color: '#888', fontSize: 13 }}>
+                  ⚠️ No employees found. Please upload your employee Excel/CSV in the Employees tab.
+                </div>
+              )}
+            </Col>
+
+            <Col xs={24} md={12} style={{ textAlign: 'right' }}>
+              <Space wrap>
+                <Button
+                  size="large"
+                  onClick={() => doPrint('back')}
+                  disabled={totalEmployees === 0}
+                  style={{ background: '#C8102E', borderColor: '#C8102E', color: '#fff', fontWeight: 700 }}
+                >
+                  🖨️ Print Back Sides (QR & Details)
+                </Button>
+                <Button
+                  size="large"
+                  onClick={() => doPrint('front')}
+                  disabled={totalEmployees === 0}
+                  style={{ background: '#D4AF37', borderColor: '#D4AF37', color: '#000', fontWeight: 700 }}
+                >
+                  🖨️ Print Front (Diwali Greetings)
+                </Button>
+                <Button
+                  size="large"
+                  onClick={() => doPrint('both')}
+                  disabled={totalEmployees === 0}
+                >
+                  🖨️ Print Both Sides
+                </Button>
+              </Space>
+            </Col>
+          </Row>
+
+          {/* Controls: Search, Group filter, View side switcher */}
+          <Row gutter={[12, 12]} style={{ marginTop: 20 }} align="middle">
+            <Col xs={24} sm={10} md={8}>
+              <Input
+                placeholder="Search Name, Emp ID, Unit, Dept..."
+                prefix={<SearchOutlined style={{ color: '#bbb' }} />}
+                value={searchText}
+                onChange={e => setSearchText(e.target.value)}
+                allowClear
               />
             </Col>
-            <Col>
-              <Button type="primary" size="large" loading={saving} onClick={saveConfig}
-                style={{ background: '#C8102E', borderColor: '#C8102E' }}>
-                ✅ Set & Configure
-              </Button>
+            <Col xs={24} sm={7} md={6}>
+              <Select
+                value={selectedGroup}
+                onChange={setSelectedGroup}
+                style={{ width: '100%' }}
+                options={[
+                  { value: 'all', label: 'All Groups' },
+                  { value: '1', label: 'Group A only' },
+                  { value: '2', label: 'Group B only' },
+                  { value: '3', label: 'Group C only' },
+                ]}
+              />
             </Col>
-            {totalCards > 0 && (
-              <Col>
-                <Button size="large" onClick={doPrint}
-                  style={{ background: '#D4AF37', borderColor: '#D4AF37', color: '#000', fontWeight: 700 }}>
-                  🖨️ Print All {totalCards} Cards
-                </Button>
-              </Col>
-            )}
+            <Col xs={24} sm={7} md={10} style={{ textAlign: 'right' }}>
+              <Space align="center">
+                <span style={{ fontSize: 13, fontWeight: 600, color: '#666' }}>Show View:</span>
+                <Select
+                  value={sideView}
+                  onChange={setSideView}
+                  style={{ width: 220 }}
+                  options={[
+                    { value: 'back', label: 'Side 2 (Back: QR & Details)' },
+                    { value: 'front', label: 'Side 1 (Front: Diwali Greeting)' },
+                    { value: 'both', label: 'Both Sides (Side-by-side)' },
+                  ]}
+                />
+              </Space>
+            </Col>
           </Row>
-          {totalCards > 0 && (
-            <div style={{ marginTop: 10, color: '#666', fontSize: 13 }}>
-              Group A: <b>1 – {groupSize}</b> &nbsp;|&nbsp;
-              Group B: <b>{groupSize + 1} – {groupSize * 2}</b> &nbsp;|&nbsp;
-              Group C: <b>{groupSize * 2 + 1} – {totalCards}</b>
-            </div>
-          )}
         </Card>
 
-        {/* Preview grid */}
-        {showCards && totalCards > 0 && (
+        {/* Cards Preview Grid */}
+        {totalEmployees > 0 && (
           <>
-            <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
-              <span style={{ fontWeight: 700, fontSize: 15 }}>Preview — {totalCards} Cards</span>
-              <span style={{ color: '#888', fontSize: 13 }}>(showing first 12 · all {totalCards} will print)</span>
+            <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span style={{ fontWeight: 700, fontSize: 15 }}>
+                Cards Preview — {filteredEmployees.length} of {totalEmployees} Cards
+              </span>
+              <span style={{ color: '#888', fontSize: 13 }}>
+                (Click any card to preview full size • All {totalEmployees} cards will print)
+              </span>
             </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
-              {Array.from({ length: Math.min(12, totalCards) }, (_, i) => i + 1).map(num => (
-                <div key={num} onClick={() => setPreviewCard(num)}
+
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, justifyContent: 'flex-start' }}>
+              {filteredEmployees.slice(0, 16).map(emp => (
+                <div
+                  key={emp._id}
+                  onClick={() => setPreviewEmp(emp)}
                   style={{ cursor: 'pointer', transition: 'transform 0.2s', display: 'inline-flex' }}
-                  onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.04)'}
+                  onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.03)'}
                   onMouseLeave={e => e.currentTarget.style.transform = 'scale(1)'}
-                  title="Click to preview"
+                  title="Click to view full preview"
                 >
-                  <CardFace num={num} total={totalCards} groupSize={groupSize} />
+                  {sideView === 'front' && <CardFront emp={emp} />}
+                  {sideView === 'back' && <CardBack emp={emp} />}
+                  {sideView === 'both' && (
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <CardFront emp={emp} />
+                      <CardBack emp={emp} />
+                    </div>
+                  )}
                 </div>
               ))}
-              {totalCards > 12 && (
-                <div style={{
-                  width: 260, height: 165, border: '2px dashed #ddd', borderRadius: 12,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  color: '#aaa', fontSize: 14, flexDirection: 'column', gap: 4
-                }}>
-                  <span style={{ fontSize: 28 }}>+{totalCards - 12}</span>
-                  <span>more cards</span>
-                  <span style={{ fontSize: 12 }}>will print</span>
+
+              {filteredEmployees.length > 16 && (
+                <div
+                  style={{
+                    width: 320,
+                    height: 202,
+                    border: '2px dashed #D4AF37',
+                    borderRadius: 12,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: '#8B6914',
+                    fontSize: 15,
+                    flexDirection: 'column',
+                    gap: 6,
+                    background: '#fffdf5',
+                  }}
+                >
+                  <span style={{ fontSize: 32, fontWeight: 800 }}>+{filteredEmployees.length - 16}</span>
+                  <span style={{ fontWeight: 600 }}>more employee cards</span>
+                  <span style={{ fontSize: 12, color: '#888' }}>Ready to print across all A4 sheets</span>
                 </div>
               )}
             </div>
@@ -162,46 +259,61 @@ function CardsTab() {
         )}
       </div>
 
-      {/* Print area — all cards */}
-      {showCards && totalCards > 0 && (
+      {/* Print Root — All Cards */}
+      {totalEmployees > 0 && (
         <div id="cards-print-root">
-          {Array.from({ length: totalCards }, (_, i) => i + 1).map(num => (
-            <CardFace key={num} num={num} total={totalCards} groupSize={groupSize} print />
+          {employees.map(emp => (
+            <React.Fragment key={emp._id}>
+              {printMode === 'back' && (
+                <div className="print-card-unit">
+                  <CardBack emp={emp} print />
+                </div>
+              )}
+              {printMode === 'front' && (
+                <div className="print-card-unit">
+                  <CardFront emp={emp} print />
+                </div>
+              )}
+              {printMode === 'both' && (
+                <div className="print-card-unit" style={{ display: 'inline-flex', gap: '2mm' }}>
+                  <CardFront emp={emp} print />
+                  <CardBack emp={emp} print />
+                </div>
+              )}
+            </React.Fragment>
           ))}
         </div>
       )}
 
+      {/* Modal Preview */}
       <Modal
-        open={previewCard !== null}
-        onCancel={() => setPreviewCard(null)}
+        open={previewEmp !== null}
+        onCancel={() => setPreviewEmp(null)}
         footer={null}
         centered
-        width={520}
-        title={`Card Preview — Scan QR to verify`}
+        width={720}
+        title={`Card Preview — ${previewEmp?.name || ''} (#${previewEmp?.payCode || previewEmp?.employeeId || ''})`}
       >
-        {previewCard && (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 24, padding: '20px 0' }}>
-            {/* Big card preview */}
-            <div style={{
-              transform: 'scale(1.6)', transformOrigin: 'top center',
-              marginBottom: 80,
-            }}>
-              <CardFace num={previewCard} total={totalCards} groupSize={groupSize} />
+        {previewEmp && (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 20, padding: '16px 0' }}>
+            <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', justifyContent: 'center' }}>
+              <div>
+                <div style={{ textAlign: 'center', fontWeight: 700, fontSize: 13, color: '#888', marginBottom: 6 }}>
+                  Side 1: Diwali Greetings
+                </div>
+                <CardFront emp={previewEmp} />
+              </div>
+              <div>
+                <div style={{ textAlign: 'center', fontWeight: 700, fontSize: 13, color: '#C8102E', marginBottom: 6 }}>
+                  Side 2: PG Fortune Fiesta Card
+                </div>
+                <CardBack emp={previewEmp} />
+              </div>
             </div>
 
-            {/* Navigation buttons */}
-            <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 8 }}>
-              <Button
-                disabled={previewCard <= 1}
-                onClick={() => setPreviewCard(p => p - 1)}
-              >← Prev</Button>
-              <span style={{ fontWeight: 700, fontSize: 16, minWidth: 80, textAlign: 'center' }}>
-                #{previewCard} of {totalCards}
-              </span>
-              <Button
-                disabled={previewCard >= totalCards}
-                onClick={() => setPreviewCard(p => p + 1)}
-              >Next →</Button>
+            <div style={{ textAlign: 'center', color: '#666', fontSize: 13, maxWidth: 500, background: '#f9f9f9', padding: '10px 18px', borderRadius: 10, border: '1px solid #eee' }}>
+              📱 <b>Scan Test:</b> Point your phone's camera at the QR code above.<br />
+              It contains: <b>EMPLOYEE NAME: {previewEmp.name}</b> | <b>EMPLOYEE CODE: {previewEmp.payCode || previewEmp.employeeId}</b> | <b>CURRENT UNIT: {previewEmp.unit || 'PGTL'}</b>
             </div>
           </div>
         )}
@@ -210,82 +322,178 @@ function CardsTab() {
   );
 }
 
-// Single card face — used both in preview and print
-function CardFace({ num, total, groupSize, print }) {
-  const DIWALI_IMG = 'https://cdn.pixabay.com/photo/2017/10/17/18/37/diwali-2861073_640.png';
-
-  const cardStyle = print ? {
-    display: 'inline-flex', flexDirection: 'column',
-    alignItems: 'center', justifyContent: 'space-between',
-    width: '85mm', height: '54mm', padding: '4mm 5mm',
-    border: '2px solid #D4AF37', borderRadius: '3mm',
-    boxSizing: 'border-box', background: '#fff',
-    fontFamily: 'Arial, sans-serif', margin: '2mm',
-    verticalAlign: 'top', pageBreakInside: 'avoid',
-  } : {
-    display: 'inline-flex', flexDirection: 'column',
-    alignItems: 'center', justifyContent: 'space-between',
-    width: 260, height: 165, padding: '10px 14px',
-    border: '2px solid #D4AF37', borderRadius: 10,
-    background: '#fff', boxShadow: '0 4px 16px rgba(212,175,55,0.25)',
-    fontFamily: 'Arial, sans-serif', boxSizing: 'border-box',
-  };
+// Side 1: Diwali Greeting Card (High Resolution Image)
+function CardFront({ emp, print }) {
+  const cardStyle = print
+    ? {
+        width: '85.6mm',
+        height: '54mm',
+        boxSizing: 'border-box',
+        borderRadius: '3mm',
+        overflow: 'hidden',
+        border: '1.5px solid #D4AF37',
+        display: 'inline-flex',
+        verticalAlign: 'top',
+        position: 'relative',
+        background: '#000',
+      }
+    : {
+        width: 320,
+        height: 202,
+        boxSizing: 'border-box',
+        borderRadius: 12,
+        overflow: 'hidden',
+        border: '2px solid #D4AF37',
+        display: 'inline-flex',
+        boxShadow: '0 6px 20px rgba(212,175,55,0.3)',
+        position: 'relative',
+        background: '#000',
+      };
 
   return (
     <div style={cardStyle}>
-
-      {/* TOP ROW: PG Logo + Title */}
-      <div style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <img
-          src="https://cms-complaint-avidence.s3.eu-north-1.amazonaws.com/pg-logo-Photoroom.png"
-          alt="PG" style={{ height: print ? '9mm' : 26, objectFit: 'contain' }}
-        />
-        <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: print ? '7pt' : 10, color: '#C8102E', fontWeight: 900, letterSpacing: 0.5 }}>
-            GRAND DIWALI LUCKY DRAW
-          </div>
-          <div style={{ fontSize: print ? '5pt' : 8, color: '#888' }}>2026 · PG Group</div>
-        </div>
-        <span style={{ fontSize: print ? '16pt' : 24 }}>🪔</span>
-      </div>
-
-      {/* MIDDLE ROW: Greeting + QR */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
-        <div style={{ flex: 1, textAlign: 'center' }}>
-          <div style={{ fontSize: print ? '9pt' : 13, fontWeight: 800, color: '#D4AF37', fontFamily: 'Georgia, serif' }}>
-            🪔 शुभ दीपावली 🪔
-          </div>
-          <div style={{ fontSize: print ? '6pt' : 9, color: '#C8102E', fontWeight: 600, marginTop: 3 }}>
-            Happy Diwali
-          </div>
-          <div style={{ fontSize: print ? '5pt' : 8, color: '#888', marginTop: 2 }}>
-            PG Group — Celebrating Together
-          </div>
-          <div style={{ fontSize: print ? '5pt' : 8, color: '#555', marginTop: 3, fontStyle: 'italic', lineHeight: 1.3 }}>
-            PG Family Wishing you a bright new chapter and a prosperous year ahead.
-          </div>
-        </div>
-
-        {/* QR only — no number text */}
-        <div style={{ flexShrink: 0, padding: print ? '0 0 0 3mm' : '0 0 0 10px' }}>
-          <QRCodeSVGWrapper value={String(num)} size={print ? 52 : 68} />
-        </div>
-      </div>
-
-      {/* BOTTOM: scan instruction */}
-      <div style={{ width: '100%', textAlign: 'center' }}>
-        <div style={{ fontSize: print ? '4.5pt' : 7, color: '#aaa', borderTop: '1px solid #f0e0b0', paddingTop: print ? '1mm' : 4 }}>
-          Scan QR to know your lucky draw number
-        </div>
-      </div>
-
+      <img
+        src="/card_greeting_front.png"
+        alt="Diwali Greetings"
+        style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+      />
     </div>
   );
 }
 
-// QR wrapper that works whether qrcode.react is imported or not
-function QRCodeSVGWrapper({ value, size }) {
-  return <QRCodeSVG value={String(value)} size={size} level="M" includeMargin={false} />;
+// Side 2: PG Fortune Fiesta Card (Header + QR Code + Employee Details)
+function CardBack({ emp, print }) {
+  const GROUP_BADGES = { 1: '#1677ff', 2: '#722ed1', 3: '#52c41a' };
+  const grpText = emp.group === 1 ? 'Group A' : emp.group === 2 ? 'Group B' : 'Group C';
+
+  const qrText =
+`EMPLOYEE NAME: ${emp.name || ''}
+EMPLOYEE CODE: ${emp.payCode || emp.employeeId || ''}
+CURRENT UNIT: ${emp.unit || 'PGTL'}`;
+
+  const cardStyle = print
+    ? {
+        width: '85.6mm',
+        height: '54mm',
+        boxSizing: 'border-box',
+        padding: '3mm 4mm',
+        border: '1.5px solid #D4AF37',
+        borderRadius: '3mm',
+        background: '#ffffff',
+        display: 'inline-flex',
+        flexDirection: 'column',
+        justifyContent: 'space-between',
+        fontFamily: 'Arial, sans-serif',
+        verticalAlign: 'top',
+        position: 'relative',
+      }
+    : {
+        width: 320,
+        height: 202,
+        boxSizing: 'border-box',
+        padding: '10px 14px',
+        border: '2px solid #D4AF37',
+        borderRadius: 12,
+        background: '#ffffff',
+        display: 'inline-flex',
+        flexDirection: 'column',
+        justifyContent: 'space-between',
+        boxShadow: '0 6px 20px rgba(212,175,55,0.25)',
+        fontFamily: 'Arial, sans-serif',
+        position: 'relative',
+      };
+
+  return (
+    <div style={cardStyle}>
+      {/* Top Header */}
+      <div style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid #f0e6d2', paddingBottom: print ? '1mm' : 4 }}>
+        <img
+          src="https://cms-complaint-avidence.s3.eu-north-1.amazonaws.com/pg-logo-Photoroom.png"
+          alt="PG"
+          style={{ height: print ? '7mm' : 24, objectFit: 'contain' }}
+        />
+        <div style={{ textAlign: 'center', flex: 1 }}>
+          <div style={{ fontSize: print ? '7.5pt' : 11, fontWeight: 900, color: '#C8102E', letterSpacing: 0.5, lineHeight: 1.1 }}>
+            PG FORTUNE FIESTA CARD
+          </div>
+          <div style={{ fontSize: print ? '5pt' : 8, color: '#888', fontWeight: 700, marginTop: 1 }}>
+            💥 The Lucky Legends 2026 💥
+          </div>
+        </div>
+        <span style={{ fontSize: print ? '12pt' : 18 }}>🪔</span>
+      </div>
+
+      {/* Middle Content: QR Code (Left) + Employee Details (Right) */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: print ? '3mm' : 12, margin: print ? '1mm 0' : '4px 0', width: '100%', flex: 1 }}>
+        {/* QR Code Container */}
+        <div
+          style={{
+            flexShrink: 0,
+            background: '#fff',
+            padding: print ? '1.5mm' : 6,
+            borderRadius: 6,
+            border: '1.5px solid #D4AF37',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <QRCodeSVG value={qrText} size={print ? 50 : 72} level="M" includeMargin={false} />
+        </div>
+
+        {/* Employee Details List */}
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: print ? '0.8mm' : 2, textAlign: 'left' }}>
+          {/* Name */}
+          <div style={{ fontSize: print ? '6.5pt' : 10, fontWeight: 900, color: '#1a1a1a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', lineHeight: 1.2 }}>
+            <span style={{ color: '#888', fontWeight: 600 }}>NAME: </span>
+            {emp.name}
+          </div>
+
+          {/* Emp ID / Code */}
+          <div style={{ fontSize: print ? '6.5pt' : 10, fontWeight: 900, color: '#C8102E', lineHeight: 1.2 }}>
+            <span style={{ color: '#888', fontWeight: 600 }}>EMP ID: </span>
+            {emp.payCode || emp.employeeId || '—'}
+          </div>
+
+          {/* Current Unit */}
+          <div style={{ fontSize: print ? '6pt' : 9, color: '#333', fontWeight: 700, lineHeight: 1.2 }}>
+            <span style={{ color: '#888', fontWeight: 600 }}>UNIT: </span>
+            {emp.unit || 'PGTL'}
+          </div>
+
+          {/* Department */}
+          <div style={{ fontSize: print ? '5.5pt' : 8.5, color: '#555', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', lineHeight: 1.2 }}>
+            <span style={{ color: '#888', fontWeight: 600 }}>DEPT: </span>
+            {emp.department || '—'}
+          </div>
+
+          {/* Group Tag */}
+          <div style={{ marginTop: print ? '0.5mm' : 2 }}>
+            <span
+              style={{
+                fontSize: print ? '4.8pt' : 7.5,
+                fontWeight: 800,
+                color: '#fff',
+                background: GROUP_BADGES[emp.group] || '#1677ff',
+                padding: print ? '0.5mm 1.5mm' : '1px 6px',
+                borderRadius: 4,
+                display: 'inline-block',
+              }}
+            >
+              {grpText}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Bottom Footer */}
+      <div style={{ width: '100%', textAlign: 'center', borderTop: '1px solid #f0e6d2', paddingTop: print ? '0.8mm' : 3 }}>
+        <div style={{ fontSize: print ? '4.5pt' : 7, color: '#888', fontWeight: 600 }}>
+          🪔 PG Group • Grand Diwali Fortune Fiesta 2026 🪔
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ── PrizesTab component ─────────────────────────────────────────────
@@ -944,8 +1152,8 @@ export default function AdminPanel() {
     setSpinning(true);
     try {
       await axios.post('/api/game/spin', {}, auth());
-      message.success('Spinning...');
-      setTimeout(() => { setSpinning(false); loadState(); }, 7500);
+      message.success('Spinning (10 seconds)...');
+      setTimeout(() => { setSpinning(false); loadState(); }, 10500);
     } catch (e) { message.error(e.response?.data?.message || 'Error'); setSpinning(false); }
   };
 
@@ -971,11 +1179,12 @@ export default function AdminPanel() {
   const isActive = gameState?.isActive || false;
 
   const winnerColumns = [
-    { title: 'Round', dataIndex: 'roundNo', width: 70, render: r => <Tag color="red">R{r}</Tag> },
-    { title: 'Group', dataIndex: 'group', width: 90, render: g => <Tag color={GROUP_COLORS[g]}>{GROUP_LABELS[g]}</Tag> },
-    { title: '#', dataIndex: 'serialNo', width: 65 },
-    { title: 'Name', dataIndex: ['employee', 'name'] },
-    { title: 'Department', dataIndex: ['employee', 'department'] },
+    { title: 'Round', dataIndex: 'roundNo', width: 75, render: r => <Tag color="red">R{r}</Tag> },
+    { title: 'Group', dataIndex: 'group', width: 95, render: g => <Tag color={GROUP_COLORS[g]}>{GROUP_LABELS[g]}</Tag> },
+    { title: 'Emp Code', dataIndex: 'winnerNumber', width: 120, render: (code, r) => <b style={{ color: '#C8102E' }}>{code || r.employeeCode || r.employee?.payCode || '—'}</b> },
+    { title: 'Name', dataIndex: ['employee', 'name'], render: v => v || '—' },
+    { title: 'Unit', dataIndex: ['employee', 'unit'], render: v => v || '—' },
+    { title: 'Department', dataIndex: ['employee', 'department'], render: v => v || '—' },
     { title: 'Prize', dataIndex: ['prize', 'name'], render: v => v || <span className="text-gray-400">—</span> },
   ];
 
@@ -1083,11 +1292,12 @@ export default function AdminPanel() {
                               await axios.post('/api/game/spin-again', {}, {
                                 headers: { Authorization: `Bearer ${localStorage.getItem('pg_admin_token')}` }
                               });
-                              message.info('Spinning again for Round ' + gameState.currentRound);
+                              message.info('Spinning again (10 seconds) for Round ' + gameState.currentRound);
+                              setTimeout(() => { setSpinning(false); loadState(); }, 10500);
                             } catch (e) {
                               message.error(e.response?.data?.message || 'Error');
+                              setSpinning(false);
                             }
-                            setSpinning(false);
                           }}
                           style={{ whiteSpace: 'nowrap', minWidth: 140 }}
                         >

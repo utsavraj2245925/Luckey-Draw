@@ -5,12 +5,7 @@ const GameState  = require('../models/GameState');
 const Winner     = require('../models/Winner');
 const Prize      = require('../models/Prize');
 const DrawConfig = require('../models/DrawConfig');
-
-function getGroupRange(group, groupSize, totalCards) {
-  const start = (group - 1) * groupSize + 1;
-  const end   = group === 3 ? totalCards : group * groupSize;
-  return { start, end };
-}
+const Employee   = require('../models/Employee');
 
 function groupForRound(round) {
   if (round <= 3) return 1;
@@ -22,13 +17,25 @@ function groupForRound(round) {
 router.post('/start', auth, async (req, res) => {
   try {
     const io = req.app.get('io');
+    const totalEmps = await Employee.countDocuments();
+    if (totalEmps === 0) {
+      return res.status(400).json({ message: 'No employees found. Please upload employee list first!' });
+    }
+    const groupSize = Math.ceil(totalEmps / 3);
+
     await GameState.findOneAndUpdate(
       { singleton: 'state' },
-      { isActive: true, status: 'idle', currentRound: 1 },
+      { isActive: true, status: 'idle', currentRound: 1, totalEmployees: totalEmps, groupSize },
       { upsert: true }
     );
-    io.emit('game:start');
-    res.json({ message: 'Game started successfully' });
+    await DrawConfig.findOneAndUpdate(
+      { singleton: 'config' },
+      { totalCards: totalEmps, groupSize },
+      { upsert: true }
+    );
+
+    if (io) io.emit('game:start');
+    res.json({ message: 'Game started successfully', totalEmployees: totalEmps, groupSize });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -37,36 +44,44 @@ router.post('/spin', auth, async (req, res) => {
   try {
     const io     = req.app.get('io');
     const state  = await GameState.findOne({ singleton: 'state' });
-    const config = await DrawConfig.findOne({ singleton: 'config' });
 
-    if (!state || !config || config.totalCards === 0)
-      return res.status(400).json({ message: 'Configure total cards first' });
+    if (!state || !state.isActive)
+      return res.status(400).json({ message: 'Start game first' });
     if (state.status === 'spinning')
       return res.status(400).json({ message: 'Already spinning' });
 
     const round = state.currentRound;
-    if (round > 9) return res.status(400).json({ message: 'All rounds complete' });
+    if (round > 9) return res.status(400).json({ message: 'All 9 rounds complete' });
 
-    // Check already drawn this round
+    // Check if winner already drawn this round
     const existing = await Winner.findOne({ roundNo: round });
     if (existing) return res.status(400).json({ message: 'Winner already drawn for this round' });
 
     const group = groupForRound(round);
-    const { start, end } = getGroupRange(group, config.groupSize, config.totalCards);
 
-    // Collect already-won numbers in this group
-    const prevWinners = await Winner.find({ group });
-    const wonNumbers  = new Set(prevWinners.map(w => w.winnerNumber));
+    // Collect already-won employee IDs
+    const prevWinners = await Winner.find();
+    const wonEmployeeIds = prevWinners.map(w => w.employee).filter(Boolean);
 
-    // Build available pool
-    const pool = [];
-    for (let n = start; n <= end; n++) {
-      if (!wonNumbers.has(n)) pool.push(n);
+    // Find eligible employees in this group from the saved employee list
+    const eligibleEmployees = await Employee.find({
+      group,
+      _id: { $nin: wonEmployeeIds },
+      hasWon: false
+    });
+
+    if (eligibleEmployees.length === 0) {
+      const gName = group === 1 ? 'Group A' : group === 2 ? 'Group B' : 'Group C';
+      return res.status(400).json({ message: `No eligible employees remaining in ${gName}` });
     }
-    if (pool.length === 0)
-      return res.status(400).json({ message: 'No numbers left in this group' });
 
-    const winnerNumber = pool[crypto.randomInt(0, pool.length)];
+    // Pick a random employee from the group
+    const winnerIndex = crypto.randomInt(0, eligibleEmployees.length);
+    const winnerEmp = eligibleEmployees[winnerIndex];
+    const winnerCode = winnerEmp.payCode || winnerEmp.employeeId || ('EMP' + winnerEmp.serialNo);
+
+    // Sample employee codes for the 10-second drum animation
+    const sampleCodes = eligibleEmployees.map(e => e.payCode || e.employeeId).filter(Boolean);
 
     // Get prize for this round
     const prize = await Prize.findOne({ roundNo: round });
@@ -77,26 +92,163 @@ router.post('/spin', auth, async (req, res) => {
       { upsert: true }
     );
 
-    io.emit('game:spin_start', { round, group, start, end });
+    // 10-second spin animation broadcast
+    if (io) {
+      io.emit('game:spin_start', {
+        round,
+        group,
+        duration: 10000,
+        sampleCodes: sampleCodes.slice(0, 50),
+      });
+    }
+
+    // After 10 seconds: reveal winner and store in database
+    setTimeout(async () => {
+      try {
+        const winner = await Winner.create({
+          roundNo: round,
+          group,
+          winnerNumber: winnerCode,
+          employeeCode: winnerCode,
+          employee: winnerEmp._id,
+          prize: prize?._id || null,
+        });
+
+        await Employee.findByIdAndUpdate(winnerEmp._id, { hasWon: true });
+
+        await GameState.findOneAndUpdate(
+          { singleton: 'state' },
+          { status: 'revealed' }
+        );
+
+        if (io) {
+          io.emit('game:winner_revealed', {
+            round,
+            group,
+            winnerNumber: winnerCode,
+            employeeCode: winnerCode,
+            employee: {
+              _id: winnerEmp._id,
+              serialNo: winnerEmp.serialNo,
+              name: winnerEmp.name,
+              payCode: winnerEmp.payCode,
+              employeeId: winnerEmp.employeeId || winnerEmp.payCode,
+              department: winnerEmp.department,
+              designation: winnerEmp.designation,
+              unit: winnerEmp.unit,
+              gender: winnerEmp.gender,
+            },
+            prize: prize ? { name: prize.name, description: prize.description, imageUrl: prize.imageUrl } : null,
+          });
+        }
+      } catch (err) {
+        console.error('Error in spin reveal timeout:', err);
+      }
+    }, 10000);
+
+    res.json({ message: 'Spinning started for 10 seconds', round, group });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// POST /spin-again — redraw same round (previous winner was absent)
+router.post('/spin-again', auth, async (req, res) => {
+  try {
+    const io     = req.app.get('io');
+    const state  = await GameState.findOne({ singleton: 'state' });
+
+    if (!state || state.status !== 'revealed')
+      return res.status(400).json({ message: 'Can only spin again after a winner is revealed' });
+
+    const round = state.currentRound;
+    const group = groupForRound(round);
+
+    // Remove previous winner for this round and mark them hasWon: false
+    const prevWinner = await Winner.findOne({ roundNo: round });
+    if (prevWinner && prevWinner.employee) {
+      await Employee.findByIdAndUpdate(prevWinner.employee, { hasWon: false });
+    }
+    await Winner.deleteOne({ roundNo: round });
+
+    // Find all remaining winners
+    const remainingWinners = await Winner.find();
+    const wonEmployeeIds = remainingWinners.map(w => w.employee).filter(Boolean);
+
+    // Find eligible employees in this group
+    const eligibleEmployees = await Employee.find({
+      group,
+      _id: { $nin: wonEmployeeIds },
+      hasWon: false
+    });
+
+    if (eligibleEmployees.length === 0) {
+      const gName = group === 1 ? 'Group A' : group === 2 ? 'Group B' : 'Group C';
+      return res.status(400).json({ message: `No eligible employees remaining in ${gName}` });
+    }
+
+    const winnerIndex = crypto.randomInt(0, eligibleEmployees.length);
+    const winnerEmp = eligibleEmployees[winnerIndex];
+    const winnerCode = winnerEmp.payCode || winnerEmp.employeeId || ('EMP' + winnerEmp.serialNo);
+    const sampleCodes = eligibleEmployees.map(e => e.payCode || e.employeeId).filter(Boolean);
+    const prize = await Prize.findOne({ roundNo: round });
+
+    await GameState.findOneAndUpdate(
+      { singleton: 'state' },
+      { status: 'spinning' }
+    );
+
+    if (io) {
+      io.emit('game:spin_start', {
+        round,
+        group,
+        duration: 10000,
+        sampleCodes: sampleCodes.slice(0, 50),
+      });
+    }
 
     setTimeout(async () => {
-      const winner = await Winner.create({
-        roundNo: round, group, winnerNumber,
-        prize: prize?._id || null,
-      });
+      try {
+        await Winner.create({
+          roundNo: round,
+          group,
+          winnerNumber: winnerCode,
+          employeeCode: winnerCode,
+          employee: winnerEmp._id,
+          prize: prize?._id || null,
+        });
 
-      await GameState.findOneAndUpdate(
-        { singleton: 'state' },
-        { status: 'revealed' }
-      );
+        await Employee.findByIdAndUpdate(winnerEmp._id, { hasWon: true });
 
-      io.emit('game:winner_revealed', {
-        round, group, winnerNumber,
-        prize: prize ? { name: prize.name, description: prize.description, imageUrl: prize.imageUrl } : null,
-      });
-    }, 6000);
+        await GameState.findOneAndUpdate(
+          { singleton: 'state' },
+          { status: 'revealed' }
+        );
 
-    res.json({ message: 'Spinning started', winnerNumber, round });
+        if (io) {
+          io.emit('game:winner_revealed', {
+            round,
+            group,
+            winnerNumber: winnerCode,
+            employeeCode: winnerCode,
+            employee: {
+              _id: winnerEmp._id,
+              serialNo: winnerEmp.serialNo,
+              name: winnerEmp.name,
+              payCode: winnerEmp.payCode,
+              employeeId: winnerEmp.employeeId || winnerEmp.payCode,
+              department: winnerEmp.department,
+              designation: winnerEmp.designation,
+              unit: winnerEmp.unit,
+              gender: winnerEmp.gender,
+            },
+            prize: prize ? { name: prize.name, description: prize.description, imageUrl: prize.imageUrl } : null,
+          });
+        }
+      } catch (err) {
+        console.error('Error in spin-again reveal timeout:', err);
+      }
+    }, 10000);
+
+    res.json({ message: 'Spinning again for 10 seconds...' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -110,15 +262,15 @@ router.post('/next-round', auth, async (req, res) => {
     const nextRound = state.currentRound + 1;
     if (nextRound > 9) {
       await GameState.findOneAndUpdate({ singleton: 'state' }, { status: 'completed' });
-      io.emit('game:completed');
-      return res.json({ message: 'All rounds complete' });
+      if (io) io.emit('game:completed');
+      return res.json({ message: 'All 9 rounds complete' });
     }
 
     await GameState.findOneAndUpdate(
       { singleton: 'state' },
       { currentRound: nextRound, status: 'idle' }
     );
-    io.emit('game:next_round', { round: nextRound, group: groupForRound(nextRound) });
+    if (io) io.emit('game:next_round', { round: nextRound, group: groupForRound(nextRound) });
     res.json({ message: `Round ${nextRound} started` });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
@@ -128,70 +280,14 @@ router.post('/reset', auth, async (req, res) => {
   try {
     const io = req.app.get('io');
     await Winner.deleteMany({});
+    await Employee.updateMany({}, { hasWon: false });
     await GameState.findOneAndUpdate(
       { singleton: 'state' },
       { currentRound: 1, status: 'idle', isActive: false },
       { upsert: true }
     );
-    io.emit('game:reset');
+    if (io) io.emit('game:reset');
     res.json({ message: 'Game reset' });
-  } catch (e) { res.status(500).json({ message: e.message }); }
-});
-
-// POST /spin-again — redraw same round (previous winner was absent)
-router.post('/spin-again', auth, async (req, res) => {
-  try {
-    const io     = req.app.get('io');
-    const state  = await GameState.findOne({ singleton: 'state' });
-    const config = await DrawConfig.findOne({ singleton: 'config' });
-
-    if (!state || state.status !== 'revealed')
-      return res.status(400).json({ message: 'Can only spin again after a winner is revealed' });
-
-    const round  = state.currentRound;
-    const group  = groupForRound(round);
-    const { start, end } = getGroupRange(group, config.groupSize, config.totalCards);
-
-    // Remove previous winner for this round so they are excluded
-    await Winner.deleteOne({ roundNo: round });
-
-    // Get all already-won numbers in this group (previous rounds only)
-    const prevWinners = await Winner.find({ group });
-    const wonNumbers  = new Set(prevWinners.map(w => w.winnerNumber));
-
-    const pool = [];
-    for (let n = start; n <= end; n++) {
-      if (!wonNumbers.has(n)) pool.push(n);
-    }
-    if (pool.length === 0)
-      return res.status(400).json({ message: 'No numbers left in this group' });
-
-    const winnerNumber = pool[crypto.randomInt(0, pool.length)];
-    const prize = await Prize.findOne({ roundNo: round });
-
-    await GameState.findOneAndUpdate(
-      { singleton: 'state' },
-      { status: 'spinning' }
-    );
-
-    io.emit('game:spin_start', { round, group, start, end });
-
-    setTimeout(async () => {
-      await Winner.create({
-        roundNo: round, group, winnerNumber,
-        prize: prize?._id || null,
-      });
-      await GameState.findOneAndUpdate(
-        { singleton: 'state' },
-        { status: 'revealed' }
-      );
-      io.emit('game:winner_revealed', {
-        round, group, winnerNumber,
-        prize: prize ? { name: prize.name, description: prize.description, imageUrl: prize.imageUrl } : null,
-      });
-    }, 6000);
-
-    res.json({ message: 'Spinning again...' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -200,7 +296,7 @@ router.get('/state', auth, async (req, res) => {
   try {
     const state   = await GameState.findOne({ singleton: 'state' });
     const config  = await DrawConfig.findOne({ singleton: 'config' });
-    const winners = await Winner.find().populate('prize').sort({ roundNo: 1 });
+    const winners = await Winner.find().populate('prize').populate('employee').sort({ roundNo: 1 });
     res.json({ state, config, winners });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });

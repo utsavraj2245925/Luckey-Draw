@@ -1,10 +1,10 @@
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
@@ -35,9 +35,8 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => console.log('Client disconnected:', socket.id));
 });
 
-
 // MongoDB + Start
-mongoose.connect(process.env.MONGO_URI || "mongodb://localhost:27017/diwali_lucky_draw")
+mongoose.connect(process.env.MONGO_URI || "mongodb://127.0.0.1:27017/diwali_lucky_draw")
   .then(() => {
     console.log('MongoDB connected');
     server.listen(process.env.PORT || 5000, () =>

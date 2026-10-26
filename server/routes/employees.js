@@ -143,6 +143,8 @@ function parseEmployeeFile(filePath) {
 
     const payCode = getColVal(
       row,
+      'EMPLOYEE CODE',
+      'EMP CODE',
       'PAY CODE',
       'PAYCODE',
       'PAY_CODE',
@@ -153,10 +155,10 @@ function parseEmployeeFile(filePath) {
       'CODE',
       'TOKEN'
     );
-    const unit = getColVal(row, 'UNIT', 'LOCATION', 'PLANT', 'BRANCH', 'SITE');
+    const unit = getColVal(row, 'CURRENT ENTITY', 'ENTITY', 'UNIT', 'LOCATION', 'PLANT', 'BRANCH', 'SITE');
     const gender = getColVal(row, 'GENDER', 'SEX');
     const department = getColVal(row, 'DEPARTMENT', 'DEPT', 'DIVISION', 'SECTION');
-    const designation = getColVal(row, 'DESIGNATION', 'DESIG', 'ROLE', 'POSITION', 'TITLE');
+    const designation = getColVal(row, 'CATEGORY', 'DESIGNATION', 'DESIG', 'ROLE', 'POSITION', 'TITLE');
 
     results.push({
       name,
